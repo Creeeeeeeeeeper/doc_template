@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Doc Template</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E📝%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.js" defer></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <h1>Doc Template</h1>
+        <div class="mode-tabs">
+          <button class="tab active" data-mode="edit" type="button">
+            <span class="tab-icon">📝</span> 制作模板
+          </button>
+          <button class="tab" data-mode="modify" type="button">
+            <span class="tab-icon">🔧</span> 修改模板
+          </button>
+          <button class="tab" data-mode="fill" type="button">
+            <span class="tab-icon">✏️</span> 填写模板
+          </button>
+        </div>
+      </header>
+
+      <!-- ============ Edit / Modify modes ============ -->
+      <!-- The editor section is shared between "制作模板" (start from any
+           docx, insert placeholders) and "修改模板" (start from an existing
+           template, tweak fields). Only the load/save button labels differ. -->
+      <section id="mode-edit" class="mode-section">
+        <div class="toolbar">
+          <button id="btn-edit-load" class="btn btn-primary">
+            选择文档 (.docx)
+          </button>
+          <span id="edit-filename" class="filename">未选择</span>
+        </div>
+
+        <section class="hint">
+          <p>
+            <strong>用法：</strong>
+            在左侧预览里点光标，或选中要替换的一段文字，然后点上方的
+            <code>+ 文字字段</code>
+            或
+            <code>+ 图片字段</code>
+            按钮 — 占位符就插到那个位置（选中的文字会被替换掉）。也可以在右侧卡片里直接编辑文字。
+          </p>
+        </section>
+
+        <div class="split-layout">
+          <section class="split-pane preview-pane">
+            <header class="pane-header">
+              📄 原格式预览
+              <span id="selection-hint" class="selection-hint">在下方文档里点光标或选中文字</span>
+              <button id="btn-insert-text" class="btn-mini" type="button" disabled>
+                + 文字字段
+              </button>
+              <button id="btn-insert-image" class="btn-mini image" type="button" disabled>
+                + 图片字段
+              </button>
+              <button id="btn-refresh-preview" class="btn-mini reset" type="button" disabled>
+                ⟳ 刷新
+              </button>
+            </header>
+            <div id="preview-container" class="preview-container">
+              <p class="empty-state">先选择一个 .docx 文档。</p>
+            </div>
+          </section>
+
+          <section class="split-pane editor-pane">
+            <header class="pane-header">
+              ✏️ 段落编辑
+              <span id="field-summary-inline" class="field-summary-inline"></span>
+            </header>
+            <div id="paragraph-list" class="paragraph-list">
+              <p class="empty-state">载入文档后这里显示段落。</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ============ Fill mode ============ -->
+      <section id="mode-fill" class="mode-section hidden">
+        <div class="toolbar">
+          <button id="btn-fill-load" class="btn btn-primary">
+            选择模板 (.docx)
+          </button>
+          <span id="fill-filename" class="filename">未选择模板</span>
+        </div>
+
+        <section class="hint">
+          <p>
+            模板里的
+            <code>{@field}</code>
+            会变成可填写的文字字段（带字体/字号/颜色），
+            <code>{%field}</code>
+            会变成图片字段。
+          </p>
+        </section>
+
+        <section id="form-section" class="form-section">
+          <p class="empty-state">先选择一个 .docx 模板。</p>
+        </section>
+      </section>
+
+      <footer class="footer">
+        <span id="status" class="status"></span>
+        <button id="btn-edit-save" class="btn btn-success" disabled>
+          保存为模板
+        </button>
+        <button id="btn-fill-export" class="btn btn-success hidden" disabled>
+          生成并保存 DOCX
+        </button>
+      </footer>
+    </main>
+
+    <!-- Add/edit field metadata modal -->
+    <dialog id="field-dialog" class="field-dialog">
+      <form id="field-dialog-form">
+        <h3 id="field-dialog-title" class="dialog-title">添加字段</h3>
+        <div class="dialog-row">
+          <label for="field-dialog-type">类型</label>
+          <select id="field-dialog-type">
+            <option value="text">文字字段（插入 {@name}）</option>
+            <option value="image">图片字段（插入 {%name}）</option>
+          </select>
+        </div>
+        <div class="dialog-row">
+          <label for="field-dialog-name">
+            名称 <span class="required">*</span>
+          </label>
+          <input
+            id="field-dialog-name"
+            type="text"
+            required
+            maxlength="64"
+            placeholder="字母/数字/下划线，例如 applicantName"
+            autocomplete="off"
+          />
+        </div>
+        <div class="dialog-row">
+          <label for="field-dialog-desc">描述（详情）</label>
+          <textarea
+            id="field-dialog-desc"
+            rows="3"
+            placeholder="（可选）填写时给操作员看的提示，例如：'甲方公司全名'"
+          ></textarea>
+        </div>
+        <div id="field-dialog-format" class="dialog-row dialog-format">
+          <label>
+            默认格式（填写时预填）
+            <span id="field-dialog-format-detected" class="dialog-detected"></span>
+          </label>
+          <div class="dialog-format-row">
+            <div id="field-dialog-font-slot" class="dialog-font-slot"></div>
+            <select id="field-dialog-size" class="size-input"></select>
+            <input id="field-dialog-color" type="color" class="color-input" />
+          </div>
+        </div>
+        <p id="field-dialog-hint" class="dialog-hint"></p>
+        <div class="dialog-actions">
+          <button type="button" id="field-dialog-cancel" class="btn">取消</button>
+          <button type="submit" id="field-dialog-ok" class="btn btn-primary">
+            确定
+          </button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

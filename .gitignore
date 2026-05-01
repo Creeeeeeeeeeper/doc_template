@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Tauri / Rust build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Generated / test docx outputs (re-created by scripts/smoke-test.js
+# and scripts/make-sample-template.js)
+sample-template.docx
+smoke-*.docx
+
+# User test documents — keep them local, not in repo
+1.*.docx
+123.docx
+
+# Claude Code session state
+.claude/
+*-hi.txt

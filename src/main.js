@@ -1,0 +1,1569 @@
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { renderAsync } from "docx-preview";
+import {
+  PizZip,
+  extractFieldsFromZip,
+  parseParagraphs,
+  renderFilled,
+  buildTemplate,
+  readFieldMeta,
+  getRunStyleAt,
+} from "./docx.js";
+
+// ============================================================
+// State
+// ============================================================
+const state = {
+  mode: "edit", // 'edit' | 'modify' | 'fill'
+  templateBytes: null,
+  filename: "",
+
+  // edit / modify mode (shared)
+  paragraphs: [],
+
+  // fill mode
+  fields: [],
+  values: {},
+
+  // Field metadata shared between edit and fill modes.
+  // Map<name, { type: 'text'|'image', description: string }>
+  // Persisted into the docx as `template/fields.json`.
+  fieldMeta: new Map(),
+};
+
+const FALLBACK_FONTS = [
+  // Common Windows / Office Chinese fonts
+  "宋体",
+  "新宋体",
+  "黑体",
+  "微软雅黑",
+  "微软雅黑 Light",
+  "楷体",
+  "楷体_GB2312",
+  "仿宋",
+  "仿宋_GB2312",
+  "隶书",
+  "幼圆",
+  "等线",
+  "等线 Light",
+  "华文中宋",
+  "华文宋体",
+  "华文黑体",
+  "华文楷体",
+  "华文细黑",
+  "华文新魏",
+  "华文行楷",
+  "华文琥珀",
+  "华文隶书",
+  "华文彩云",
+  "方正书宋_GBK",
+  "方正姚体",
+  "方正舒体",
+  "Arial",
+  "Arial Black",
+  "Arial Narrow",
+  "Calibri",
+  "Calibri Light",
+  "Cambria",
+  "Cambria Math",
+  "Candara",
+  "Comic Sans MS",
+  "Consolas",
+  "Constantia",
+  "Corbel",
+  "Courier New",
+  "Georgia",
+  "Helvetica",
+  "Impact",
+  "Lucida Console",
+  "Lucida Sans Unicode",
+  "Microsoft Sans Serif",
+  "Palatino Linotype",
+  "Segoe UI",
+  "Segoe UI Light",
+  "Tahoma",
+  "Times New Roman",
+  "Trebuchet MS",
+  "Verdana",
+];
+
+let cachedFonts = null;
+async function getFonts() {
+  if (cachedFonts) return cachedFonts;
+
+  // 1) Preferred: ask Rust to enumerate fonts. This walks the system font
+  //    dirs and parses each TTF/OTF/TTC `name` table directly, so:
+  //      - no permission prompt is needed (queryLocalFonts requires one)
+  //      - we get the same localized family names Word shows (e.g.
+  //        "方正小标宋简体" rather than the PostScript / English name)
+  //      - per-user fonts (%LOCALAPPDATA%\Microsoft\Windows\Fonts) are
+  //        included, which queryLocalFonts can miss.
+  try {
+    const fonts = await invoke("list_fonts");
+    if (Array.isArray(fonts) && fonts.length > 0) {
+      fonts.sort((a, b) => {
+        const aZh = /[\u4e00-\u9fa5]/.test(a);
+        const bZh = /[\u4e00-\u9fa5]/.test(b);
+        if (aZh !== bZh) return aZh ? -1 : 1;
+        return a.localeCompare(b, "zh-Hans-CN");
+      });
+      cachedFonts = fonts;
+      console.info(`Loaded ${fonts.length} font families from Rust`);
+      return cachedFonts;
+    }
+  } catch (e) {
+    console.warn("list_fonts failed; falling back:", e);
+  }
+
+  // 2) Fallback: queryLocalFonts (Chromium Local Font Access API). May show
+  //    a permission prompt and may miss some fonts.
+  if (
+    typeof window !== "undefined" &&
+    typeof window.queryLocalFonts === "function"
+  ) {
+    try {
+      const fonts = await window.queryLocalFonts();
+      const families = [...new Set(fonts.map((f) => f.family))];
+      families.sort((a, b) => {
+        const aZh = /[\u4e00-\u9fa5]/.test(a);
+        const bZh = /[\u4e00-\u9fa5]/.test(b);
+        if (aZh !== bZh) return aZh ? -1 : 1;
+        return a.localeCompare(b, "zh-Hans-CN");
+      });
+      cachedFonts = families;
+      console.info(`Loaded ${families.length} font families from queryLocalFonts`);
+      return cachedFonts;
+    } catch (e) {
+      console.warn("queryLocalFonts failed; falling back to preset list:", e);
+    }
+  }
+
+  // 3) Last resort: a baked-in list of common fonts.
+  cachedFonts = FALLBACK_FONTS.slice();
+  return cachedFonts;
+}
+
+// Word-style font sizes. `value` is pt (used in OOXML). `label` is what we
+// show in the dropdown — both Chinese name sizes (初号..八号) and numeric
+// pt values, mirroring what Word's font-size combobox shows.
+const SIZE_PRESETS_ZH = [
+  { value: 42, label: "初号" },
+  { value: 36, label: "小初" },
+  { value: 26, label: "一号" },
+  { value: 24, label: "小一" },
+  { value: 22, label: "二号" },
+  { value: 18, label: "小二" },
+  { value: 16, label: "三号" },
+  { value: 15, label: "小三" },
+  { value: 14, label: "四号" },
+  { value: 12, label: "小四" },
+  { value: 10.5, label: "五号" },
+  { value: 9, label: "小五" },
+  { value: 7.5, label: "六号" },
+  { value: 6.5, label: "小六" },
+  { value: 5.5, label: "七号" },
+  { value: 5, label: "八号" },
+];
+const SIZE_PRESETS_NUM = [
+  { value: 5, label: "5" },
+  { value: 5.5, label: "5.5" },
+  { value: 6.5, label: "6.5" },
+  { value: 7.5, label: "7.5" },
+  { value: 8, label: "8" },
+  { value: 9, label: "9" },
+  { value: 10, label: "10" },
+  { value: 10.5, label: "10.5" },
+  { value: 11, label: "11" },
+  { value: 12, label: "12" },
+  { value: 14, label: "14" },
+  { value: 16, label: "16" },
+  { value: 18, label: "18" },
+  { value: 20, label: "20" },
+  { value: 22, label: "22" },
+  { value: 24, label: "24" },
+  { value: 26, label: "26" },
+  { value: 28, label: "28" },
+  { value: 36, label: "36" },
+  { value: 48, label: "48" },
+  { value: 72, label: "72" },
+];
+const ALL_SIZE_PRESETS = [...SIZE_PRESETS_ZH, ...SIZE_PRESETS_NUM];
+
+// ============================================================
+// DOM
+// ============================================================
+const els = {
+  tabs: document.querySelectorAll(".mode-tabs .tab"),
+  modeEdit: document.getElementById("mode-edit"),
+  modeFill: document.getElementById("mode-fill"),
+
+  btnEditLoad: document.getElementById("btn-edit-load"),
+  editFilename: document.getElementById("edit-filename"),
+  previewContainer: document.getElementById("preview-container"),
+  btnRefreshPreview: document.getElementById("btn-refresh-preview"),
+  btnInsertText: document.getElementById("btn-insert-text"),
+  btnInsertImage: document.getElementById("btn-insert-image"),
+  selectionHint: document.getElementById("selection-hint"),
+  paragraphList: document.getElementById("paragraph-list"),
+  fieldSummaryInline: document.getElementById("field-summary-inline"),
+  btnEditSave: document.getElementById("btn-edit-save"),
+
+  btnFillLoad: document.getElementById("btn-fill-load"),
+  fillFilename: document.getElementById("fill-filename"),
+  formSection: document.getElementById("form-section"),
+  btnFillExport: document.getElementById("btn-fill-export"),
+
+  status: document.getElementById("status"),
+};
+
+// ============================================================
+// Utility
+// ============================================================
+function setStatus(msg, kind = "") {
+  els.status.textContent = msg;
+  els.status.className = "status" + (kind ? " " + kind : "");
+}
+
+function fileToUint8Array(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(new Uint8Array(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsArrayBuffer(file);
+  });
+}
+
+async function pickDocx(title) {
+  const sel = await open({
+    multiple: false,
+    title,
+    filters: [{ name: "Word Document", extensions: ["docx"] }],
+  });
+  if (!sel) return null;
+  return typeof sel === "string" ? sel : sel.path;
+}
+
+async function readBytesFromPath(path) {
+  const arr = await invoke("read_file_bytes", { path });
+  return new Uint8Array(arr);
+}
+
+async function saveBytesViaDialog(suggestedName, bytes) {
+  const target = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Word Document", extensions: ["docx"] }],
+  });
+  if (!target) return null;
+  await invoke("save_bytes", { path: target, bytes: Array.from(bytes) });
+  return target;
+}
+
+function basename(path) {
+  return path.split(/[\\/]/).pop();
+}
+
+// ============================================================
+// Mode switching
+// ============================================================
+// "edit" and "modify" share the same editor section — the difference is
+// only signposting (load button label, save button label, hint text).
+// "fill" uses a separate section.
+const EDITOR_LABELS = {
+  edit: { load: "选择文档 (.docx)", save: "保存为模板" },
+  modify: { load: "选择模板 (.docx)", save: "保存修改" },
+};
+
+function switchMode(mode) {
+  state.mode = mode;
+  els.tabs.forEach((t) =>
+    t.classList.toggle("active", t.dataset.mode === mode),
+  );
+  const isEditor = mode === "edit" || mode === "modify";
+  els.modeEdit.classList.toggle("hidden", !isEditor);
+  els.modeFill.classList.toggle("hidden", mode !== "fill");
+  els.btnEditSave.classList.toggle("hidden", !isEditor);
+  els.btnFillExport.classList.toggle("hidden", mode !== "fill");
+
+  if (isEditor) {
+    const labels = EDITOR_LABELS[mode];
+    els.btnEditLoad.textContent = labels.load;
+    els.btnEditSave.textContent = labels.save;
+  }
+  setStatus("");
+}
+
+els.tabs.forEach((t) =>
+  t.addEventListener("click", () => {
+    switchMode(t.dataset.mode);
+    // Warm the font cache on the user gesture of switching to fill mode.
+    if (t.dataset.mode === "fill") getFonts();
+  }),
+);
+
+// ============================================================
+// Edit mode — preview selection capture and field insertion
+// ============================================================
+// Last captured selection inside the preview, kept even after the user clicks
+// the toolbar button (which would otherwise blur the preview's selection).
+let previewSelection = null; // { pIdx, start, end, fullText, selectedText }
+
+function findParagraphElement(node) {
+  let cur = node;
+  while (cur) {
+    if (cur.nodeType === 1 && cur.dataset?.pIdx != null) return cur;
+    cur = cur.parentNode;
+  }
+  return null;
+}
+
+// Compute the character offset of (container, offset) within rootElement, by
+// walking text nodes in document order.
+function getCharOffsetWithin(rootElement, container, offset) {
+  if (container === rootElement) {
+    let count = 0;
+    for (let i = 0; i < offset && i < rootElement.childNodes.length; i++) {
+      count += rootElement.childNodes[i].textContent?.length ?? 0;
+    }
+    return count;
+  }
+  let count = 0;
+  const walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walker.nextNode())) {
+    if (n === container) return count + offset;
+    count += n.textContent.length;
+  }
+  // Container might be an element node; fall back to range-style offset
+  if (container.nodeType === 1) {
+    let c = 0;
+    for (let i = 0; i < offset && i < container.childNodes.length; i++) {
+      c += container.childNodes[i].textContent?.length ?? 0;
+    }
+    // Need to find the start position of `container` within rootElement
+    let pre = 0;
+    const w2 = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT);
+    let node2;
+    while ((node2 = w2.nextNode())) {
+      if (container.contains(node2)) break;
+      pre += node2.textContent.length;
+    }
+    return pre + c;
+  }
+  return null;
+}
+
+function captureSelection() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return; // keep last
+  const range = sel.getRangeAt(0);
+  if (!els.previewContainer.contains(range.commonAncestorContainer)) {
+    return; // selection moved elsewhere — keep last preview selection
+  }
+
+  const startP = findParagraphElement(range.startContainer);
+  if (!startP) {
+    previewSelection = null;
+    updateSelectionUI();
+    return;
+  }
+  const pIdx = Number(startP.dataset.pIdx);
+  if (pIdx >= state.paragraphs.length) {
+    previewSelection = null;
+    updateSelectionUI();
+    return;
+  }
+
+  const startOffset = getCharOffsetWithin(
+    startP,
+    range.startContainer,
+    range.startOffset,
+  );
+  if (startOffset == null) {
+    previewSelection = null;
+    updateSelectionUI();
+    return;
+  }
+  const endP = findParagraphElement(range.endContainer);
+  let endOffset;
+  if (endP === startP) {
+    endOffset = getCharOffsetWithin(startP, range.endContainer, range.endOffset);
+    if (endOffset == null) endOffset = startOffset;
+  } else {
+    // Selection crosses paragraphs — clip to start paragraph end
+    endOffset = startP.textContent.length;
+  }
+
+  const s = Math.min(startOffset, endOffset);
+  const e = Math.max(startOffset, endOffset);
+  const fullText = startP.textContent;
+  const selectedText = fullText.slice(s, e);
+
+  previewSelection = { pIdx, start: s, end: e, fullText, selectedText };
+  updateSelectionUI();
+}
+
+function updateSelectionUI() {
+  const has = !!previewSelection;
+  els.btnInsertText.disabled = !has;
+  els.btnInsertImage.disabled = !has;
+  if (has) {
+    els.selectionHint.classList.add("has-selection");
+    const t = previewSelection.selectedText;
+    if (t) {
+      const trim = t.length > 20 ? t.slice(0, 20) + "…" : t;
+      els.selectionHint.textContent = `选中 "${trim}" (${t.length} 字)`;
+    } else {
+      els.selectionHint.textContent = `光标在第 ${previewSelection.pIdx + 1} 段`;
+    }
+  } else {
+    els.selectionHint.classList.remove("has-selection");
+    els.selectionHint.textContent = "在下方文档里点光标或选中文字";
+  }
+}
+
+function clearPreviewSelection() {
+  previewSelection = null;
+  updateSelectionUI();
+}
+
+async function insertAtSelection(type) {
+  if (!previewSelection) return;
+  const { pIdx, start, end, fullText } = previewSelection;
+
+  // Auto-detect formatting at the cursor position so the dialog can offer
+  // it as the field's default format (font/size/color).
+  const p = state.paragraphs[pIdx];
+  const detected = getRunStyleAt(p.originalXml, start);
+
+  const result = await openFieldDialog({
+    type,
+    defaultFont: detected?.font,
+    defaultSize: detected?.size,
+    defaultColor: detected?.color,
+    detectedFromXml: !!detected,
+  });
+  if (!result) return;
+  const {
+    name,
+    type: fieldType,
+    description,
+    defaultFont,
+    defaultSize,
+    defaultSizeLabel,
+    defaultColor,
+  } = result;
+
+  state.fieldMeta.set(name, {
+    type: fieldType,
+    description,
+    defaultFont: defaultFont || null,
+    defaultSize: defaultSize ?? null,
+    defaultSizeLabel: defaultSizeLabel || null,
+    defaultColor: defaultColor || null,
+  });
+
+  const placeholder = fieldType === "image" ? `{%${name}}` : `{@${name}}`;
+  const newText = fullText.slice(0, start) + placeholder + fullText.slice(end);
+
+  p.currentText = newText;
+  p.dirty = newText !== p.originalText;
+
+  renderParagraphList();
+  updateFieldSummary();
+  clearPreviewSelection();
+  await refreshPreview();
+  focusEditCard(pIdx);
+}
+
+// listen globally — selectionchange fires when selection moves
+document.addEventListener("selectionchange", captureSelection);
+
+// Prevent buttons from stealing focus / clearing the document selection
+[els.btnInsertText, els.btnInsertImage].forEach((b) => {
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+});
+els.btnInsertText.addEventListener("click", () => insertAtSelection("text"));
+els.btnInsertImage.addEventListener("click", () => insertAtSelection("image"));
+
+// ============================================================
+// Edit mode — preview rendering
+// ============================================================
+async function renderPreview(bytes) {
+  const container = els.previewContainer;
+  container.innerHTML = "";
+  const blob = new Blob([bytes], {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  try {
+    await renderAsync(blob, container, undefined, {
+      inWrapper: true,
+      breakPages: false,
+      ignoreLastRenderedPageBreak: true,
+      renderHeaders: false,
+      renderFooters: false,
+      renderFootnotes: false,
+      renderEndnotes: false,
+      experimental: false,
+      ignoreWidth: true,
+      ignoreHeight: true,
+    });
+  } catch (e) {
+    console.error("renderAsync failed", e);
+    container.innerHTML =
+      '<p class="empty-state">预览渲染失败：' +
+      (e?.message || e) +
+      "</p>";
+    return;
+  }
+
+  // Annotate paragraphs in document order so they map to state.paragraphs[i]
+  const ps = container.querySelectorAll("p");
+  const limit = Math.min(ps.length, state.paragraphs.length);
+  for (let i = 0; i < limit; i++) {
+    const p = ps[i];
+    p.dataset.pIdx = String(i);
+    p.classList.add("preview-paragraph");
+    p.addEventListener("click", () => focusEditCard(i));
+  }
+  if (ps.length !== state.paragraphs.length) {
+    console.warn(
+      `paragraph count mismatch: preview=${ps.length}, parsed=${state.paragraphs.length}. ` +
+        "First " +
+        limit +
+        " will be linked.",
+    );
+  }
+}
+
+function clearActivePreview() {
+  els.previewContainer
+    .querySelectorAll(".preview-paragraph.active")
+    .forEach((p) => p.classList.remove("active"));
+}
+
+function highlightPreview(idx) {
+  clearActivePreview();
+  const p = els.previewContainer.querySelector(
+    `.preview-paragraph[data-p-idx="${idx}"]`,
+  );
+  if (p) p.classList.add("active");
+}
+
+function focusEditCard(idx) {
+  const card = els.paragraphList.querySelector(
+    `.paragraph-card[data-p-idx="${idx}"]`,
+  );
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("highlighted");
+  setTimeout(() => card.classList.remove("highlighted"), 1200);
+  const ta = card.querySelector("textarea");
+  if (ta) ta.focus();
+  highlightPreview(idx);
+}
+
+// ============================================================
+// Edit mode — paragraph cards
+// ============================================================
+function detectFieldsInText(text) {
+  const re = /\{([@%])(\w+)\}/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    out.push({ name: m[2], type: m[1] === "%" ? "image" : "text" });
+  }
+  return out;
+}
+
+function updateFieldSummary() {
+  // Combine fields detected in text + persisted metadata
+  const map = new Map();
+  for (const p of state.paragraphs) {
+    for (const f of detectFieldsInText(p.currentText)) {
+      if (!map.has(f.name)) map.set(f.name, { type: f.type, used: true });
+    }
+  }
+  for (const [name, m] of state.fieldMeta) {
+    if (!map.has(name)) map.set(name, { type: m.type, used: false });
+  }
+
+  els.fieldSummaryInline.innerHTML = "";
+  if (map.size === 0) {
+    const span = document.createElement("span");
+    span.className = "field-summary-inline-text";
+    span.style.opacity = "0.7";
+    span.textContent = "（尚无字段，先在预览里选位置插入）";
+    els.fieldSummaryInline.appendChild(span);
+    return;
+  }
+
+  const label = document.createElement("span");
+  label.style.opacity = "0.7";
+  label.style.marginRight = "4px";
+  label.textContent = `${map.size} 个字段：`;
+  els.fieldSummaryInline.appendChild(label);
+
+  for (const [name, info] of map) {
+    const meta = state.fieldMeta.get(name);
+    const occ = info.used ? countOccurrences(name) : 0;
+
+    const wrap = document.createElement("span");
+    wrap.className = `field-tag-wrap ${info.type}`;
+    if (!info.used) wrap.classList.add("untyped");
+
+    // Name button: opens edit dialog (where user can also rename)
+    const tag = document.createElement("button");
+    tag.type = "button";
+    tag.className = "field-tag-name";
+    tag.innerHTML = `<span class="field-tag-text">${name}</span>${
+      occ > 0 ? `<span class="field-tag-count">×${occ}</span>` : ""
+    }`;
+    tag.title =
+      (meta?.description ? `描述：${meta.description}\n` : "（点击编辑/重命名）\n") +
+      (info.used
+        ? `在文档中出现 ${occ} 次`
+        : "尚未在文档里出现（仅元数据）");
+    tag.addEventListener("click", async () => {
+      const updated = await openFieldDialog({
+        title: `编辑字段 "${name}"`,
+        type: info.type,
+        name,
+        description: meta?.description || "",
+        defaultFont: meta?.defaultFont,
+        defaultSize: meta?.defaultSize,
+        defaultSizeLabel: meta?.defaultSizeLabel,
+        defaultColor: meta?.defaultColor,
+        // Name is editable — submit handler validates & runs renameField.
+        lockName: false,
+        // Type can't change once placeholders exist in the doc, since
+        // {@x} and {%x} are not interchangeable mid-document.
+        lockType: info.used,
+        existingName: name,
+      });
+      if (!updated) return;
+
+      // Name was changed → propagate rename across paragraphs + metadata
+      if (updated.name !== name) {
+        renameField(name, updated.name);
+      }
+      const finalMeta = {
+        type: updated.type,
+        description: updated.description,
+        defaultFont: updated.defaultFont || null,
+        defaultSize: updated.defaultSize ?? null,
+        defaultSizeLabel: updated.defaultSizeLabel || null,
+        defaultColor: updated.defaultColor || null,
+      };
+      state.fieldMeta.set(updated.name, finalMeta);
+
+      renderParagraphList();
+      updateFieldSummary();
+      await refreshPreview();
+    });
+
+    // Delete button: strip placeholders + metadata
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "field-tag-del";
+    del.textContent = "×";
+    del.title = "删除此字段";
+    del.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const msg =
+        occ > 0
+          ? `删除字段 "${name}"？\n这会从文档里移除 ${occ} 处占位符并删除元数据，不可撤销。`
+          : `删除字段元数据 "${name}"？`;
+      if (!confirm(msg)) return;
+      deleteField(name);
+      renderParagraphList();
+      updateFieldSummary();
+      await refreshPreview();
+    });
+
+    wrap.append(tag, del);
+    els.fieldSummaryInline.appendChild(wrap);
+  }
+}
+
+function insertAtCursor(textarea, snippet) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? textarea.value.length;
+  const before = textarea.value.slice(0, start);
+  const after = textarea.value.slice(end);
+  textarea.value = before + snippet + after;
+  const cursor = start + snippet.length;
+  textarea.selectionStart = textarea.selectionEnd = cursor;
+  textarea.focus();
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// ============================================================
+// Field metadata helpers + add/edit modal
+// ============================================================
+function syncFieldMetaFromText() {
+  // Auto-register any {@xxx}/{%xxx} the user typed directly into a card
+  for (const p of state.paragraphs) {
+    for (const m of p.currentText.matchAll(/\{([@%])(\w+)\}/g)) {
+      const name = m[2];
+      const type = m[1] === "%" ? "image" : "text";
+      if (!state.fieldMeta.has(name)) {
+        state.fieldMeta.set(name, { type, description: "" });
+      }
+    }
+  }
+}
+
+function countOccurrences(name) {
+  const re = new RegExp(`\\{[@%]${name}\\}`, "g");
+  let total = 0;
+  for (const p of state.paragraphs) {
+    total += (p.currentText.match(re) || []).length;
+  }
+  return total;
+}
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Rename a field across the entire document AND its metadata entry.
+// Returns true if anything changed. Caller is responsible for refreshing UI.
+function renameField(oldName, newName) {
+  if (oldName === newName) return false;
+  const re = new RegExp(`\\{([@%])${escapeRegex(oldName)}\\}`, "g");
+  let touched = false;
+  for (const p of state.paragraphs) {
+    const next = p.currentText.replace(re, `{$1${newName}}`);
+    if (next !== p.currentText) {
+      p.currentText = next;
+      p.dirty = next !== p.originalText;
+      touched = true;
+    }
+  }
+  // Transfer metadata key (preserve insertion order isn't guaranteed but
+  // updateFieldSummary doesn't rely on it).
+  const meta = state.fieldMeta.get(oldName);
+  state.fieldMeta.delete(oldName);
+  if (meta) state.fieldMeta.set(newName, meta);
+  return touched || !!meta;
+}
+
+// Delete a field: strip {@name} / {%name} from every paragraph and drop
+// the metadata entry. Returns true if anything changed.
+function deleteField(name) {
+  const re = new RegExp(`\\{[@%]${escapeRegex(name)}\\}`, "g");
+  let touched = false;
+  for (const p of state.paragraphs) {
+    const next = p.currentText.replace(re, "");
+    if (next !== p.currentText) {
+      p.currentText = next;
+      p.dirty = next !== p.originalText;
+      touched = true;
+    }
+  }
+  if (state.fieldMeta.delete(name)) touched = true;
+  return touched;
+}
+
+const fieldDialogEls = {
+  dlg: document.getElementById("field-dialog"),
+  form: document.getElementById("field-dialog-form"),
+  title: document.getElementById("field-dialog-title"),
+  type: document.getElementById("field-dialog-type"),
+  name: document.getElementById("field-dialog-name"),
+  desc: document.getElementById("field-dialog-desc"),
+  hint: document.getElementById("field-dialog-hint"),
+  cancel: document.getElementById("field-dialog-cancel"),
+  format: document.getElementById("field-dialog-format"),
+  formatDetected: document.getElementById("field-dialog-format-detected"),
+  fontSlot: document.getElementById("field-dialog-font-slot"),
+  size: document.getElementById("field-dialog-size"),
+  color: document.getElementById("field-dialog-color"),
+};
+
+let dialogFontPicker = null;
+
+function ensureDialogSizeOptions() {
+  if (fieldDialogEls.size.options.length > 0) return;
+  const zh = document.createElement("optgroup");
+  zh.label = "字号";
+  for (const s of SIZE_PRESETS_ZH) {
+    const opt = document.createElement("option");
+    opt.value = s.label;
+    opt.textContent = s.label;
+    opt.dataset.pt = String(s.value);
+    zh.appendChild(opt);
+  }
+  const num = document.createElement("optgroup");
+  num.label = "磅值";
+  for (const s of SIZE_PRESETS_NUM) {
+    const opt = document.createElement("option");
+    opt.value = s.label;
+    opt.textContent = s.label;
+    opt.dataset.pt = String(s.value);
+    num.appendChild(opt);
+  }
+  fieldDialogEls.size.append(zh, num);
+}
+
+// Open the add/edit field modal. Returns Promise<FieldMeta|null> where
+// FieldMeta = { name, type, description, defaultFont, defaultSize,
+//               defaultSizeLabel, defaultColor }.
+async function openFieldDialog(defaults = {}) {
+  const {
+    type = "text",
+    name = "",
+    description = "",
+    defaultFont = null,
+    defaultSize = null,
+    defaultSizeLabel = null,
+    defaultColor = null,
+    detectedFromXml = false, // when true, show "(已检测)" hint
+    title = "添加字段",
+    lockType = false,
+    lockName = false,
+    // When set, this dialog is editing an existing field; the submit
+    // handler must allow `name` to equal `existingName` even though that
+    // name is "already taken" (it's just unchanged), and warn before
+    // colliding with a DIFFERENT existing field.
+    existingName = null,
+  } = defaults;
+
+  // Lazy-init font picker inside dialog (needs fonts list)
+  if (!dialogFontPicker) {
+    const fonts = await getFonts();
+    dialogFontPicker = createFontPicker(fonts, "宋体", () => {});
+    fieldDialogEls.fontSlot.appendChild(dialogFontPicker.wrap);
+  }
+  ensureDialogSizeOptions();
+
+  return new Promise((resolve) => {
+    fieldDialogEls.title.textContent = title;
+    fieldDialogEls.type.value = type;
+    fieldDialogEls.type.disabled = lockType;
+    fieldDialogEls.name.value = name;
+    fieldDialogEls.name.disabled = lockName;
+    fieldDialogEls.desc.value = description;
+    fieldDialogEls.hint.textContent = "";
+    fieldDialogEls.hint.classList.remove("exists");
+
+    // Default format defaults
+    dialogFontPicker.input.value = defaultFont || "宋体";
+    const sizeLabel =
+      defaultSizeLabel ||
+      (defaultSize != null ? findSizeByValue(defaultSize)?.label : null) ||
+      "小四";
+    fieldDialogEls.size.value = sizeLabel;
+    if (fieldDialogEls.size.selectedIndex < 0) {
+      // size label wasn't in options; fall back to 小四
+      fieldDialogEls.size.value = "小四";
+    }
+    fieldDialogEls.color.value = defaultColor || "#000000";
+
+    fieldDialogEls.formatDetected.textContent = detectedFromXml
+      ? "（已从光标位置自动读取）"
+      : "";
+    fieldDialogEls.format.classList.toggle("hidden", type === "image");
+
+    let descTouched = !!description;
+
+    function onTypeChange() {
+      fieldDialogEls.format.classList.toggle(
+        "hidden",
+        fieldDialogEls.type.value === "image",
+      );
+    }
+    function onNameInput() {
+      const n = fieldDialogEls.name.value.trim();
+      if (!n) {
+        fieldDialogEls.hint.textContent = "";
+        fieldDialogEls.hint.classList.remove("exists");
+        return;
+      }
+      // When editing an existing field and the name hasn't changed, this
+      // is just the field itself — don't show a duplicate warning.
+      if (existingName && n === existingName) {
+        fieldDialogEls.hint.textContent = "";
+        fieldDialogEls.hint.classList.remove("exists");
+        return;
+      }
+      const existing = state.fieldMeta.get(n);
+      if (existing) {
+        const cnType = existing.type === "image" ? "图片" : "文字";
+        const occ = countOccurrences(n);
+        if (existingName) {
+          // Editing-rename mode: this is a collision, not "reuse"
+          fieldDialogEls.hint.textContent =
+            `名称 "${n}" 已被另一个字段占用 (${cnType}${occ > 0 ? `，已用 ${occ} 处` : ""})`;
+          fieldDialogEls.hint.classList.remove("exists");
+        } else {
+          fieldDialogEls.hint.textContent =
+            occ > 0
+              ? `已存在 "${n}" (${cnType})，文档里已用了 ${occ} 处。描述会同步到所有位置。`
+              : `已记录字段 "${n}" (${cnType})，复用其描述`;
+          fieldDialogEls.hint.classList.add("exists");
+          if (!lockType) fieldDialogEls.type.value = existing.type;
+          onTypeChange();
+          if (!descTouched) {
+            fieldDialogEls.desc.value = existing.description || "";
+          }
+        }
+      } else {
+        fieldDialogEls.hint.textContent = "";
+        fieldDialogEls.hint.classList.remove("exists");
+      }
+    }
+    function onDescInput() {
+      descTouched = true;
+    }
+    function cleanup() {
+      fieldDialogEls.type.removeEventListener("change", onTypeChange);
+      fieldDialogEls.name.removeEventListener("input", onNameInput);
+      fieldDialogEls.desc.removeEventListener("input", onDescInput);
+      fieldDialogEls.cancel.removeEventListener("click", onCancel);
+      fieldDialogEls.form.removeEventListener("submit", onSubmit);
+      fieldDialogEls.dlg.removeEventListener("cancel", onCancel);
+    }
+    function onCancel(e) {
+      e?.preventDefault?.();
+      cleanup();
+      fieldDialogEls.dlg.close();
+      resolve(null);
+    }
+    function onSubmit(e) {
+      e.preventDefault();
+      const n = fieldDialogEls.name.value.trim();
+      if (!/^\w+$/.test(n)) {
+        fieldDialogEls.hint.textContent =
+          "名称只能包含字母、数字、下划线（不要有空格或中文）";
+        fieldDialogEls.hint.classList.remove("exists");
+        fieldDialogEls.name.focus();
+        return;
+      }
+      // Rename-collision check: if we're editing an existing field and
+      // the user typed a NEW name that already belongs to a DIFFERENT
+      // field, refuse — otherwise we'd merge two fields' placeholders.
+      if (existingName && n !== existingName && state.fieldMeta.has(n)) {
+        fieldDialogEls.hint.textContent =
+          `已存在字段 "${n}"，重命名会与之冲突。请换一个名字。`;
+        fieldDialogEls.hint.classList.remove("exists");
+        fieldDialogEls.name.focus();
+        return;
+      }
+      const finalType = fieldDialogEls.type.value;
+      const result = {
+        name: n,
+        type: finalType,
+        description: fieldDialogEls.desc.value.trim(),
+      };
+      if (finalType === "text") {
+        const opt = fieldDialogEls.size.options[fieldDialogEls.size.selectedIndex];
+        result.defaultFont = dialogFontPicker.input.value.trim() || null;
+        result.defaultSizeLabel = opt?.value || null;
+        result.defaultSize = opt ? Number(opt.dataset.pt) : null;
+        result.defaultColor = fieldDialogEls.color.value || null;
+      }
+      cleanup();
+      fieldDialogEls.dlg.close();
+      resolve(result);
+    }
+
+    fieldDialogEls.type.addEventListener("change", onTypeChange);
+    fieldDialogEls.name.addEventListener("input", onNameInput);
+    fieldDialogEls.desc.addEventListener("input", onDescInput);
+    fieldDialogEls.cancel.addEventListener("click", onCancel);
+    fieldDialogEls.form.addEventListener("submit", onSubmit);
+    fieldDialogEls.dlg.addEventListener("cancel", onCancel);
+
+    fieldDialogEls.dlg.showModal();
+    onNameInput();
+    setTimeout(() => fieldDialogEls.name.focus(), 0);
+  });
+}
+
+// Searchable font picker — replaces <datalist> which has tiny popups
+// in Chromium-based webviews.
+function createFontPicker(fonts, initialValue, onChange) {
+  const wrap = document.createElement("div");
+  wrap.className = "font-picker";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "input font-input";
+  input.value = initialValue || "";
+  input.placeholder = "字体（输入搜索）";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+
+  const list = document.createElement("ul");
+  list.className = "font-picker-list";
+
+  let activeIdx = -1;
+  let visible = [];
+
+  function paint(filter = "") {
+    const f = filter.toLowerCase();
+    visible = f ? fonts.filter((x) => x.toLowerCase().includes(f)) : fonts.slice();
+    list.innerHTML = "";
+    if (visible.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "font-picker-empty";
+      empty.textContent = "没有匹配的字体（保留输入即可）";
+      list.appendChild(empty);
+      return;
+    }
+    visible.forEach((font, i) => {
+      const li = document.createElement("li");
+      li.className = "font-picker-item";
+      li.textContent = font;
+      try {
+        li.style.fontFamily = `"${font.replace(/"/g, "")}", sans-serif`;
+      } catch {}
+      if (i === activeIdx) li.classList.add("active");
+      li.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        select(font);
+      });
+      list.appendChild(li);
+    });
+  }
+  function select(font) {
+    input.value = font;
+    onChange(font);
+    closeList();
+  }
+  function openList() {
+    list.classList.add("open");
+    // Always show the full list on open (don't auto-filter by current value —
+    // the family name we have stored may not exactly match the system font's
+    // family name, in which case filtering would show "no matches"). User can
+    // type to filter.
+    paint("");
+    // Highlight + scroll to the currently-selected font, if any
+    const idx = visible.indexOf(input.value);
+    if (idx >= 0) {
+      activeIdx = idx;
+      paint("");
+      scrollToActive();
+    }
+  }
+  function closeList() {
+    list.classList.remove("open");
+    activeIdx = -1;
+  }
+  function scrollToActive() {
+    const el = list.querySelector(".font-picker-item.active");
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }
+
+  input.addEventListener("focus", openList);
+  input.addEventListener("click", openList);
+  input.addEventListener("blur", () => setTimeout(closeList, 150));
+  input.addEventListener("input", () => {
+    onChange(input.value);
+    activeIdx = -1;
+    // Filter only when user actively types something
+    paint(input.value);
+    if (!list.classList.contains("open")) list.classList.add("open");
+  });
+  input.addEventListener("keydown", (e) => {
+    if (!list.classList.contains("open")) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Enter") {
+        openList();
+      }
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIdx = Math.min(activeIdx + 1, visible.length - 1);
+      paint(input.value);
+      scrollToActive();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIdx = Math.max(activeIdx - 1, 0);
+      paint(input.value);
+      scrollToActive();
+    } else if (e.key === "Enter") {
+      if (activeIdx >= 0 && visible[activeIdx]) {
+        e.preventDefault();
+        select(visible[activeIdx]);
+      }
+    } else if (e.key === "Escape") {
+      closeList();
+    }
+  });
+
+  wrap.append(input, list);
+  return { wrap, input };
+}
+
+function renderParagraphList() {
+  els.paragraphList.innerHTML = "";
+  if (state.paragraphs.length === 0) {
+    els.paragraphList.innerHTML =
+      '<p class="empty-state">文档里没有可编辑的段落。</p>';
+    return;
+  }
+
+  for (const p of state.paragraphs) {
+    const card = document.createElement("div");
+    card.className = "paragraph-card";
+    card.dataset.pIdx = String(p.index);
+
+    const num = document.createElement("div");
+    num.className = "paragraph-num";
+    num.textContent = `${p.index + 1}.`;
+    card.appendChild(num);
+
+    const body = document.createElement("div");
+    body.className = "paragraph-body";
+
+    const ta = document.createElement("textarea");
+    ta.className = "paragraph-textarea";
+    ta.rows = Math.max(1, p.currentText.split("\n").length);
+    ta.value = p.currentText;
+    ta.placeholder = "(空段落)";
+
+    ta.addEventListener("input", () => {
+      p.currentText = ta.value;
+      p.dirty = p.currentText !== p.originalText;
+      card.classList.toggle("dirty", p.dirty);
+      card.classList.toggle(
+        "has-placeholder",
+        /\{[@%]\w+\}/.test(p.currentText),
+      );
+      ta.rows = Math.max(1, ta.value.split("\n").length);
+      syncFieldMetaFromText();
+      updateFieldSummary();
+    });
+
+    ta.addEventListener("focus", () => highlightPreview(p.index));
+
+    body.appendChild(ta);
+
+    const actions = document.createElement("div");
+    actions.className = "paragraph-actions";
+
+    const btnText = document.createElement("button");
+    btnText.type = "button";
+    btnText.className = "btn-mini";
+    btnText.textContent = "+ 文字字段";
+    btnText.addEventListener("click", async () => {
+      const ss = ta.selectionStart;
+      const se = ta.selectionEnd;
+      const detected = getRunStyleAt(p.originalXml, ss);
+      const result = await openFieldDialog({
+        type: "text",
+        defaultFont: detected?.font,
+        defaultSize: detected?.size,
+        defaultColor: detected?.color,
+        detectedFromXml: !!detected,
+      });
+      if (!result) return;
+      state.fieldMeta.set(result.name, {
+        type: result.type,
+        description: result.description,
+        defaultFont: result.defaultFont || null,
+        defaultSize: result.defaultSize ?? null,
+        defaultSizeLabel: result.defaultSizeLabel || null,
+        defaultColor: result.defaultColor || null,
+      });
+      ta.focus();
+      ta.selectionStart = ss;
+      ta.selectionEnd = se;
+      insertAtCursor(
+        ta,
+        result.type === "image" ? `{%${result.name}}` : `{@${result.name}}`,
+      );
+      updateFieldSummary();
+    });
+
+    const btnImg = document.createElement("button");
+    btnImg.type = "button";
+    btnImg.className = "btn-mini image";
+    btnImg.textContent = "+ 图片字段";
+    btnImg.addEventListener("click", async () => {
+      const ss = ta.selectionStart;
+      const se = ta.selectionEnd;
+      const result = await openFieldDialog({ type: "image" });
+      if (!result) return;
+      state.fieldMeta.set(result.name, {
+        type: result.type,
+        description: result.description,
+      });
+      ta.focus();
+      ta.selectionStart = ss;
+      ta.selectionEnd = se;
+      insertAtCursor(
+        ta,
+        result.type === "image" ? `{%${result.name}}` : `{@${result.name}}`,
+      );
+      updateFieldSummary();
+    });
+
+    const btnReset = document.createElement("button");
+    btnReset.type = "button";
+    btnReset.className = "btn-mini reset";
+    btnReset.textContent = "撤销修改";
+    btnReset.addEventListener("click", () => {
+      p.currentText = p.originalText;
+      p.dirty = false;
+      ta.value = p.originalText;
+      card.classList.remove("dirty");
+      card.classList.toggle(
+        "has-placeholder",
+        /\{[@%]\w+\}/.test(p.currentText),
+      );
+      ta.rows = Math.max(1, p.currentText.split("\n").length);
+      updateFieldSummary();
+    });
+
+    actions.append(btnText, btnImg, btnReset);
+    if (p.hasComplex) {
+      const warn = document.createElement("span");
+      warn.style.cssText =
+        "font-size:11px;color:var(--warning);margin-left:auto;";
+      warn.title = "此段含图片/超链接等复杂内容，编辑后可能丢失";
+      warn.textContent = "⚠ 复杂段落";
+      actions.appendChild(warn);
+    }
+    body.appendChild(actions);
+
+    card.appendChild(body);
+    if (/\{[@%]\w+\}/.test(p.currentText)) {
+      card.classList.add("has-placeholder");
+    }
+    els.paragraphList.appendChild(card);
+  }
+}
+
+async function editLoad() {
+  const path = await pickDocx("选择文档");
+  if (!path) return;
+  try {
+    const bytes = await readBytesFromPath(path);
+    const zip = new PizZip(bytes);
+    state.templateBytes = bytes;
+    state.filename = basename(path);
+    state.paragraphs = parseParagraphs(zip);
+    state.fieldMeta = readFieldMeta(zip);
+    syncFieldMetaFromText();
+    els.editFilename.textContent = state.filename;
+    setStatus(`已加载，共 ${state.paragraphs.length} 段，正在渲染预览…`);
+
+    renderParagraphList();
+    updateFieldSummary();
+    clearPreviewSelection();
+    els.btnEditSave.disabled = false;
+    els.btnRefreshPreview.disabled = false;
+
+    await renderPreview(bytes);
+    setStatus(`已加载，共 ${state.paragraphs.length} 段`);
+  } catch (e) {
+    console.error(e);
+    setStatus("加载失败：" + (e?.message || e), "error");
+  }
+}
+
+async function editSave() {
+  if (!state.templateBytes) return;
+  setStatus("生成中…");
+  try {
+    syncFieldMetaFromText();
+    const out = buildTemplate(
+      state.templateBytes,
+      state.paragraphs,
+      state.fieldMeta,
+    );
+    // In modify mode the input is already a template; default to overwriting
+    // it (Tauri's save dialog still prompts on collision). In edit mode we
+    // append -template so the original docx isn't replaced.
+    const stem = state.filename.replace(/\.docx$/i, "");
+    const suggested =
+      state.mode === "modify"
+        ? state.filename
+        : stem + "-template.docx";
+    const target = await saveBytesViaDialog(suggested, out);
+    if (!target) {
+      setStatus("已取消保存");
+      return;
+    }
+    setStatus(
+      state.mode === "modify"
+        ? "已保存修改：" + target
+        : "已保存模板：" + target,
+      "success",
+    );
+  } catch (e) {
+    console.error(e);
+    setStatus("保存失败：" + (e?.message || e), "error");
+  }
+}
+
+async function refreshPreview() {
+  if (!state.templateBytes || state.paragraphs.length === 0) return;
+  setStatus("刷新预览…");
+  try {
+    syncFieldMetaFromText();
+    const updated = buildTemplate(
+      state.templateBytes,
+      state.paragraphs,
+      state.fieldMeta,
+    );
+    await renderPreview(updated);
+    const dirty = state.paragraphs.filter((p) => p.dirty).length;
+    setStatus(
+      dirty > 0 ? `预览已刷新（已修改 ${dirty} 段）` : "预览已刷新",
+      "success",
+    );
+  } catch (e) {
+    console.error(e);
+    setStatus("刷新失败：" + (e?.message || e), "error");
+  }
+}
+
+els.btnEditLoad.addEventListener("click", editLoad);
+els.btnEditSave.addEventListener("click", editSave);
+els.btnRefreshPreview.addEventListener("click", refreshPreview);
+
+// ============================================================
+// Fill mode
+// ============================================================
+async function fillLoad() {
+  // Warm the font cache early. Rust enumeration is fast (~50ms) but parses
+  // every system font, so kick it off in parallel with the file dialog
+  // instead of making the user wait when they first see the form.
+  getFonts();
+
+  const path = await pickDocx("选择模板");
+  if (!path) return;
+  try {
+    const bytes = await readBytesFromPath(path);
+    const zip = new PizZip(bytes);
+    state.templateBytes = bytes;
+    state.filename = basename(path);
+    state.fields = extractFieldsFromZip(zip);
+    state.fieldMeta = readFieldMeta(zip);
+    state.values = {};
+    els.fillFilename.textContent = state.filename;
+    setStatus(`已加载模板，发现 ${state.fields.length} 个字段`);
+    await renderForm();
+  } catch (e) {
+    console.error(e);
+    setStatus("加载失败：" + (e?.message || e), "error");
+  }
+}
+
+function labeled(label, child) {
+  const wrap = document.createElement("label");
+  wrap.className = "labeled";
+  const span = document.createElement("span");
+  span.textContent = label;
+  wrap.append(span, child);
+  return wrap;
+}
+
+function findSizeByLabel(label) {
+  return ALL_SIZE_PRESETS.find((s) => s.label === String(label));
+}
+function findSizeByValue(value) {
+  // Prefer the Chinese name when both exist for the same pt
+  return ALL_SIZE_PRESETS.find((s) => Number(s.value) === Number(value));
+}
+
+async function renderForm() {
+  els.formSection.innerHTML = "";
+  if (state.fields.length === 0) {
+    els.formSection.innerHTML =
+      '<p class="empty-state">没有在模板中找到 {@field} 或 {%field} 占位符。可以切到「制作模板」加占位符。</p>';
+    els.btnFillExport.disabled = true;
+    return;
+  }
+
+  const fonts = await getFonts();
+
+  for (const field of state.fields) {
+    const card = document.createElement("div");
+    card.className = "field-card";
+
+    const head = document.createElement("div");
+    head.className = "field-head";
+    head.innerHTML = `<span class="field-name">${field.name}</span><span class="field-type ${field.type}">${field.type}</span>`;
+    card.appendChild(head);
+
+    // Show the stored description (if any) right under the head
+    const meta = state.fieldMeta.get(field.name);
+    if (meta?.description) {
+      const desc = document.createElement("div");
+      desc.className = "field-description";
+      desc.textContent = meta.description;
+      card.appendChild(desc);
+    }
+
+    if (field.type === "text") {
+      const m = state.fieldMeta.get(field.name);
+      const defFont = m?.defaultFont || "宋体";
+      const defSize = m?.defaultSize ?? 12;
+      const defSizeLabel =
+        m?.defaultSizeLabel ||
+        (m?.defaultSize != null ? findSizeByValue(m.defaultSize)?.label : null) ||
+        "小四";
+      const defColor = m?.defaultColor || "#000000";
+
+      const v =
+        state.values[field.name] || {
+          text: "",
+          font: defFont,
+          sizeLabel: defSizeLabel,
+          size: defSize,
+          color: defColor,
+        };
+      if (v.size && !v.sizeLabel) {
+        v.sizeLabel = findSizeByValue(v.size)?.label ?? String(v.size);
+      }
+      state.values[field.name] = v;
+
+      const ta = document.createElement("textarea");
+      ta.className = "input text-input";
+      ta.placeholder = "在此输入文字（支持换行）";
+      ta.rows = 2;
+      ta.value = v.text;
+      ta.addEventListener("input", () => (v.text = ta.value));
+
+      const controls = document.createElement("div");
+      controls.className = "controls";
+
+      // Font: searchable custom dropdown (avoids Chromium <datalist> popup
+      // that only shows ~4 items and is hard to scroll on long font lists)
+      const fontPicker = createFontPicker(fonts, v.font, (val) => {
+        v.font = val.trim() || "Calibri";
+      });
+
+      // Size: optgroup'd select with both 初号..八号 and numeric pt values
+      const sizeSel = document.createElement("select");
+      sizeSel.className = "input size-input";
+
+      const zhGroup = document.createElement("optgroup");
+      zhGroup.label = "字号";
+      for (const s of SIZE_PRESETS_ZH) {
+        const opt = document.createElement("option");
+        opt.value = s.label;
+        opt.textContent = s.label;
+        opt.dataset.pt = String(s.value);
+        if (s.label === v.sizeLabel) opt.selected = true;
+        zhGroup.appendChild(opt);
+      }
+
+      const numGroup = document.createElement("optgroup");
+      numGroup.label = "磅值";
+      for (const s of SIZE_PRESETS_NUM) {
+        const opt = document.createElement("option");
+        opt.value = s.label;
+        opt.textContent = s.label;
+        opt.dataset.pt = String(s.value);
+        if (s.label === v.sizeLabel) opt.selected = true;
+        numGroup.appendChild(opt);
+      }
+      sizeSel.append(zhGroup, numGroup);
+
+      sizeSel.addEventListener("change", () => {
+        const opt = sizeSel.options[sizeSel.selectedIndex];
+        v.sizeLabel = opt.value;
+        v.size = Number(opt.dataset.pt);
+      });
+
+      const colorInp = document.createElement("input");
+      colorInp.type = "color";
+      colorInp.className = "color-input";
+      colorInp.value = v.color;
+      colorInp.addEventListener("input", () => (v.color = colorInp.value));
+
+      controls.append(
+        labeled("字体", fontPicker.wrap),
+        labeled("字号", sizeSel),
+        labeled("颜色", colorInp),
+      );
+
+      card.appendChild(ta);
+      card.appendChild(controls);
+    } else {
+      const v = state.values[field.name] || {
+        bytes: null,
+        mime: "",
+        filename: "",
+      };
+      state.values[field.name] = v;
+
+      const row = document.createElement("div");
+      row.className = "image-row";
+
+      const fileInp = document.createElement("input");
+      fileInp.type = "file";
+      fileInp.accept = "image/png,image/jpeg,image/gif";
+
+      const preview = document.createElement("span");
+      preview.className = "image-preview-name";
+      preview.textContent = v.filename || "尚未选择图片";
+
+      fileInp.addEventListener("change", async () => {
+        const f = fileInp.files?.[0];
+        if (!f) return;
+        v.bytes = await fileToUint8Array(f);
+        v.mime = f.type;
+        v.filename = f.name;
+        preview.textContent = f.name;
+      });
+
+      row.append(fileInp, preview);
+      card.appendChild(row);
+    }
+
+    els.formSection.appendChild(card);
+  }
+  els.btnFillExport.disabled = false;
+}
+
+async function fillExport() {
+  if (!state.templateBytes) return;
+  setStatus("生成中…");
+  try {
+    const values = {};
+    for (const f of state.fields) {
+      const v = state.values[f.name];
+      if (f.type === "text") {
+        values[f.name] = {
+          text: v?.text ?? "",
+          font: v?.font || "Calibri",
+          size: v?.size || 12,
+          color: v?.color || "#000000",
+        };
+      } else {
+        values[f.name] = { bytes: v?.bytes };
+      }
+    }
+    const out = renderFilled(state.templateBytes, state.fields, values);
+    const suggested = state.filename.replace(/\.docx$/i, "") + "-filled.docx";
+    const target = await saveBytesViaDialog(suggested, out);
+    if (!target) {
+      setStatus("已取消保存");
+      return;
+    }
+    setStatus("已保存：" + target, "success");
+  } catch (e) {
+    console.error(e);
+    const msg = e?.properties?.errors
+      ? e.properties.errors
+          .map((x) => x.properties?.explanation || x.message)
+          .join("; ")
+      : e?.message || String(e);
+    setStatus("生成失败：" + msg, "error");
+  }
+}
+
+els.btnFillLoad.addEventListener("click", fillLoad);
+els.btnFillExport.addEventListener("click", fillExport);
+
+// Initial state
+switchMode("edit");
+updateFieldSummary();
+updateSelectionUI();

@@ -1,0 +1,26 @@
+{
+  "name": "doc-template-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-dialog": "^2.0.1",
+    "docx-preview": "^0.3.7",
+    "docxtemplater": "^3.50.0",
+    "docxtemplater-image-module-free": "^1.1.1",
+    "pizzip": "^3.1.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "vite": "^5.4.10"
+  }
+}
