@@ -288,8 +288,6 @@ function applyPreviewZoom() {
     docx.style.marginBottom = "14px";
   }
   updateZoomUI();
-  // Re-annotate after zoom changes
-  annotateImagePlaceholders();
 }
 
 function setPreviewScale(scale) {
@@ -822,7 +820,6 @@ els.btnInsertImage.addEventListener("click", () => insertAtSelection("image"));
 async function renderPreview(bytes) {
   const container = els.previewContainer;
   container.innerHTML = "";
-  removeImagePlaceholderAnnotations();
   const blob = new Blob([bytes], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
@@ -874,118 +871,12 @@ async function renderPreview(bytes) {
   } else {
     applyPreviewZoom();
   }
-
-  // Annotate image placeholders with dashed borders
-  annotateImagePlaceholders();
 }
 
 function clearActivePreview() {
   els.previewContainer
     .querySelectorAll(".preview-paragraph.active")
     .forEach((p) => p.classList.remove("active"));
-}
-
-function removeImagePlaceholderAnnotations() {
-  els.previewContainer
-    .querySelectorAll(".image-placeholder-rect")
-    .forEach((el) => el.remove());
-}
-
-function annotateImagePlaceholders() {
-  removeImagePlaceholderAnnotations();
-  requestAnimationFrame(() => {
-    // Search the entire preview container for {%name} patterns
-    const container = els.previewContainer;
-    const allText = container.textContent || "";
-    const fieldNames = new Set();
-    for (const m of allText.matchAll(/\{%(\w+)\}/g)) {
-      fieldNames.add(m[1]);
-    }
-    if (fieldNames.size === 0) return;
-
-    // Walk all text nodes in the container and find matching ranges
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-    const textNodes = [];
-    let nd;
-    while ((nd = walker.nextNode())) {
-      if (nd.textContent) textNodes.push(nd);
-    }
-    // Concatenate to build a map of char offset -> node
-    let fullText = "";
-    const charMap = []; // charMap[i] = { node, offsetInNode }
-    for (const n of textNodes) {
-      const t = n.textContent || "";
-      for (let i = 0; i < t.length; i++) {
-        charMap.push({ node: n, offsetInNode: i });
-      }
-      fullText += t;
-    }
-
-    for (const fieldName of fieldNames) {
-      const search = `{%${fieldName}}`;
-      let idx = fullText.indexOf(search);
-      while (idx >= 0) {
-        const endIdx = idx + search.length;
-        if (idx < charMap.length && endIdx <= charMap.length) {
-          const range = document.createRange();
-          range.setStart(charMap[idx].node, charMap[idx].offsetInNode);
-          range.setEnd(charMap[endIdx - 1].node, charMap[endIdx - 1].offsetInNode + 1);
-          const rect = range.getBoundingClientRect();
-          if (rect.width > 0 || rect.height > 0) {
-            const containerRect = container.getBoundingClientRect();
-            const overlay = document.createElement("div");
-            overlay.className = "image-placeholder-rect";
-            overlay.innerHTML = `<span class="image-placeholder-label">{%${fieldName}}</span>`;
-            overlay.style.left = `${rect.left - containerRect.left + container.scrollLeft}px`;
-            overlay.style.top = `${rect.top - containerRect.top + container.scrollTop}px`;
-            overlay.style.width = `${rect.width}px`;
-            overlay.style.height = `${rect.height}px`;
-            container.appendChild(overlay);
-          }
-        }
-        idx = fullText.indexOf(search, endIdx);
-      }
-    }
-  });
-}
-
-function findTextRangeInElement(root, searchText) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const textNodes = [];
-  let node;
-  while ((node = walker.nextNode())) {
-    if (node.textContent) textNodes.push(node);
-  }
-  // Concatenate all text content and find the search string
-  let fullText = "";
-  const offsets = []; // [{node, startInFull}]
-  for (const n of textNodes) {
-    offsets.push({ node, startInFull: fullText.length });
-    fullText += n.textContent || "";
-  }
-  const idx = fullText.indexOf(searchText);
-  if (idx < 0) return null;
-  const endIdx = idx + searchText.length;
-  const range = document.createRange();
-  // Find start node
-  for (const o of offsets) {
-    const localStart = idx - o.startInFull;
-    const nodeLen = (o.node.textContent || "").length;
-    if (localStart >= 0 && localStart < nodeLen) {
-      range.setStart(o.node, localStart);
-      break;
-    }
-  }
-  // Find end node
-  for (const o of offsets) {
-    const localEnd = endIdx - o.startInFull;
-    const nodeLen = (o.node.textContent || "").length;
-    if (localEnd > 0 && localEnd <= nodeLen) {
-      range.setEnd(o.node, localEnd);
-      break;
-    }
-  }
-  return range;
 }
 
 function autoResizeEditor(editor) {
@@ -2028,7 +1919,6 @@ els.previewContainer.addEventListener(
 
 window.addEventListener("resize", () => {
   if (previewFitWidth) applyPreviewZoom();
-  else annotateImagePlaceholders();
 });
 
 // ============================================================
