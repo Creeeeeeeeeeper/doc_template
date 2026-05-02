@@ -15,6 +15,7 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
     "@tauri-apps/plugin-fs": "^2.5.0",
+    "@tauri-apps/plugin-shell": "^2.3.5",
     "docx-preview": "^0.3.7",
     "docxtemplater": "^3.50.0",
     "docxtemplater-image-module-free": "^1.1.1",

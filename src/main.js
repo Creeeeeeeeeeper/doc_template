@@ -1,5 +1,6 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { writeTextFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { renderAsync } from "docx-preview";
 import * as XLSX from "xlsx";
@@ -2729,3 +2730,9 @@ els.btnBatchImport.addEventListener("click", batchImport);
 switchMode("edit");
 updateFieldSummary();
 updateSelectionUI();
+
+// GitHub link
+document.getElementById("github-link")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  shellOpen("https://github.com/Creeeeeeeeeeper/doc_template");
+});
