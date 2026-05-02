@@ -824,58 +824,23 @@ els.btnInsertImage.addEventListener("click", () => insertAtSelection("image"));
 // Edit mode — preview rendering
 // ============================================================
 function fixPreviewImages(container) {
-  // docx-preview renders images in several ways depending on the DOCX:
-  // 1. Inline images: <img> inside normal flow — usually OK
-  // 2. Floating/anchored images: <img> inside absolutely positioned <div> —
-  //    these can overlap text or be clipped outside the page.
-  //
-  // Strategy:
-  // - Convert floating image containers to inline-block where possible
-  // - Constrain image size to fit within the page width
-  // - Ensure images have a visible placeholder if src is broken
-
-  const docxEl = container.querySelector(".docx");
-  if (!docxEl) return;
-  const pageWidth = docxEl.offsetWidth || 600;
-
-  // Process all image containers created by docx-preview
-  // docx-preview wraps floating images in a <div> with inline style
-  // containing position:absolute or position:relative
   const allImgs = container.querySelectorAll("img");
   for (const img of allImgs) {
-    // Ensure images don't exceed page width
-    img.style.maxWidth = "100%";
-    img.style.height = "auto";
-
-    // Find the closest wrapper div that docx-preview creates for drawings
-    let wrapper = img.closest("div[style]");
-    if (wrapper) {
-      const style = wrapper.getAttribute("style") || "";
-      // If it's a floating/absolute container, try to make it flow better
+    let el = img.parentElement;
+    // Walk up a few levels to find the absolute-positioned wrapper
+    // that docx-preview creates for anchored images
+    for (let i = 0; i < 4 && el; i++) {
+      const style = el.getAttribute("style") || "";
       if (/position\s*:\s*absolute/i.test(style)) {
-        // Convert to relative so it participates in normal flow
-        wrapper.style.position = "relative";
-        wrapper.style.display = "inline-block";
-        // Remove offsets that push it off-screen
-        wrapper.style.left = "";
-        wrapper.style.top = "";
-        wrapper.style.right = "";
-        wrapper.style.bottom = "";
+        el.style.position = "relative";
+        el.style.removeProperty("left");
+        el.style.removeProperty("top");
+        el.style.removeProperty("right");
+        el.style.removeProperty("bottom");
+        break;
       }
-      // If it has a fixed pixel width that's too large, constrain it
-      const w = parseFloat(wrapper.style.width);
-      if (w > pageWidth) {
-        wrapper.style.width = "100%";
-        wrapper.style.maxWidth = pageWidth + "px";
-      }
+      el = el.parentElement;
     }
-  }
-
-  // Also handle <svg> elements (docx-preview sometimes renders shapes as SVG)
-  const allSvgs = container.querySelectorAll("svg");
-  for (const svg of allSvgs) {
-    svg.style.maxWidth = "100%";
-    svg.style.height = "auto";
   }
 }
 
@@ -1239,6 +1204,8 @@ const fieldDialogEls = {
   fontSlot: document.getElementById("field-dialog-font-slot"),
   size: document.getElementById("field-dialog-size"),
   color: document.getElementById("field-dialog-color"),
+  colorSwatch: document.getElementById("field-dialog-color-swatch"),
+  colorHex: document.getElementById("field-dialog-color-hex"),
   imageConfig: document.getElementById("field-dialog-image-config"),
   fitMode: document.getElementById("field-dialog-fit-mode"),
   maintainRatio: document.getElementById("field-dialog-maintain-ratio"),
@@ -1332,11 +1299,28 @@ async function openFieldDialog(defaults = {}) {
       fieldDialogEls.size.value = "小四";
     }
     fieldDialogEls.color.value = defaultColor || "#000000";
+    if (fieldDialogEls.colorSwatch) {
+      fieldDialogEls.colorSwatch.style.background = defaultColor || "#000000";
+    }
+    if (fieldDialogEls.colorHex) {
+      fieldDialogEls.colorHex.textContent = (defaultColor || "#000000").toUpperCase();
+    }
 
     fieldDialogEls.formatDetected.textContent = detectedFromXml
       ? "（已从光标位置自动读取）"
       : "";
     fieldDialogEls.format.classList.toggle("hidden", type === "image" || hideFormat);
+
+    // Color hex display sync
+    function onColorInput() {
+      if (fieldDialogEls.colorSwatch) {
+        fieldDialogEls.colorSwatch.style.background = fieldDialogEls.color.value;
+      }
+      if (fieldDialogEls.colorHex) {
+        fieldDialogEls.colorHex.textContent = fieldDialogEls.color.value.toUpperCase();
+      }
+    }
+    fieldDialogEls.color.addEventListener("input", onColorInput);
 
     // Image config defaults
     const ic = imageConfig || {};
@@ -1381,14 +1365,11 @@ async function openFieldDialog(defaults = {}) {
         } else {
           fieldDialogEls.hint.textContent =
             occ > 0
-              ? `已存在 "${n}" (${cnType})，文档里已用了 ${occ} 处。描述会同步到所有位置。`
-              : `已记录字段 "${n}" (${cnType})，复用其描述`;
+              ? `已存在 "${n}" (${cnType})，文档里已用了 ${occ} 处`
+              : `已记录字段 "${n}" (${cnType})`;
           fieldDialogEls.hint.classList.add("exists");
           if (!lockType) fieldDialogEls.type.value = existing.type;
           onTypeChange();
-          if (!descTouched) {
-            fieldDialogEls.desc.value = existing.description || "";
-          }
         }
       } else {
         fieldDialogEls.hint.textContent = "";
@@ -1402,6 +1383,7 @@ async function openFieldDialog(defaults = {}) {
       fieldDialogEls.type.removeEventListener("change", onTypeChange);
       fieldDialogEls.name.removeEventListener("input", onNameInput);
       fieldDialogEls.desc.removeEventListener("input", onDescInput);
+      fieldDialogEls.color.removeEventListener("input", onColorInput);
       fieldDialogEls.cancel.removeEventListener("click", onCancel);
       fieldDialogEls.form.removeEventListener("submit", onSubmit);
       fieldDialogEls.dlg.removeEventListener("cancel", onCancel);
@@ -1722,7 +1704,7 @@ function renderParagraphList() {
         lockType: true,
         lockName: false,
         existingName: name,
-        hideDescription: true,
+        hideDescription: false,
       });
       if (!result) return;
       // If name changed, do a full rename across all paragraphs
@@ -2008,6 +1990,7 @@ async function fillLoad() {
     state.fieldMeta = fieldMeta;
     state.occurrenceStyles = occStyles;
     state.values = {};
+    fillOccOverrides.clear();
     els.fillFilename.textContent = state.filename;
     setStatus(`已加载模板，发现 ${state.fields.length} 个字段`);
     await renderForm();
@@ -2063,7 +2046,7 @@ async function renderForm() {
   const fonts = await getFonts();
 
   // Group occurrences by field name for fill mode
-  const fieldOccMap = new Map(); // name -> [{font, size, sizeLabel, color}, ...]
+  const fieldOccMap = new Map(); // name -> [{font, size, sizeLabel, color, description}, ...]
   for (const [, styles] of state.occurrenceStyles) {
     for (const entry of styles) {
       if (!entry || !entry.name) continue;
@@ -2073,6 +2056,7 @@ async function renderForm() {
         size: entry.size ?? null,
         sizeLabel: entry.sizeLabel || null,
         color: entry.color || null,
+        description: entry.description || null,
       });
     }
   }
@@ -2107,7 +2091,8 @@ async function renderForm() {
         // Multiple occurrences: each gets its own card with synced text
         const allTas = [];
         for (let i = 0; i < occs.length; i++) {
-          const card = createFillFieldCard(field.name, field.type, meta?.description, `${i + 1}/${occs.length}`);
+          const occDesc = occs[i].description || meta?.description || "";
+          const card = createFillFieldCard(field.name, field.type, occDesc, `${i + 1}/${occs.length}`);
           const ta = createFillTextarea(v);
           ta.addEventListener("input", () => {
             // Sync all other textareas
@@ -2278,12 +2263,25 @@ function createFillStyleControls(fonts, occs, idx) {
   colorInp.type = "color";
   colorInp.className = "color-input";
   colorInp.value = o.color || "#000000";
-  colorInp.addEventListener("input", () => (o.color = colorInp.value));
+  const colorSwatch = document.createElement("div");
+  colorSwatch.className = "color-swatch";
+  colorSwatch.style.background = o.color || "#000000";
+  const colorHex = document.createElement("span");
+  colorHex.className = "color-hex";
+  colorHex.textContent = (o.color || "#000000").toUpperCase();
+  const colorWrap = document.createElement("div");
+  colorWrap.className = "color-input-wrap";
+  colorWrap.append(colorSwatch, colorInp, colorHex);
+  colorInp.addEventListener("input", () => {
+    o.color = colorInp.value;
+    colorSwatch.style.background = colorInp.value;
+    colorHex.textContent = colorInp.value.toUpperCase();
+  });
 
   wrap.append(
     labeled("字体", fontPicker.wrap),
     labeled("字号", sizeSel),
-    labeled("颜色", colorInp),
+    labeled("颜色", colorWrap),
   );
   return wrap;
 }
@@ -2291,6 +2289,25 @@ function createFillStyleControls(fonts, occs, idx) {
 async function fillExport() {
   if (!state.templateBytes) return;
   setStatus("生成中…");
+
+  // Sync per-occurrence descriptions from fill form back to occurrenceStyles
+  for (const [key, override] of fillOccOverrides) {
+    const [name, occIdxStr] = key.split(":");
+    const occIdx = Number(occIdxStr);
+    for (const [, styles] of state.occurrenceStyles) {
+      let count = 0;
+      for (const s of styles) {
+        if (s && s.name === name) {
+          if (count === occIdx) {
+            s.description = override.description;
+            break;
+          }
+          count++;
+        }
+      }
+    }
+  }
+
   try {
     const values = {};
     const occStyleMap = new Map(); // name -> [{font, size, color}, ...]
@@ -2351,6 +2368,9 @@ els.btnFillExport.addEventListener("click", fillExport);
 // ============================================================
 // Batch: export template + Excel (edit mode)
 // ============================================================
+// Per-occurrence data edited in fill form (keyed by "name:occIdx")
+const fillOccOverrides = new Map();
+
 function showConfirm(title, message) {
   const dlg = document.getElementById("confirm-dialog");
   const titleEl = document.getElementById("confirm-dialog-title");

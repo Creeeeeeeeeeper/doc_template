@@ -501,6 +501,7 @@ export function buildTemplate(templateBytes, paragraphs, fieldMeta, occurrenceSt
               size: styles[occ].size ?? null,
               sizeLabel: styles[occ].sizeLabel || null,
               color: styles[occ].color || null,
+              description: styles[occ].description || null,
             });
           }
           occ++;
@@ -577,6 +578,7 @@ export function readFieldMeta(zip) {
         size: entry.size ?? null,
         sizeLabel: entry.sizeLabel || null,
         color: entry.color || null,
+        description: entry.description || null,
       };
     }
     return { fieldMeta: map, occStyles };

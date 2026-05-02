@@ -162,7 +162,11 @@
           <div class="dialog-format-row">
             <div id="field-dialog-font-slot" class="dialog-font-slot"></div>
             <select id="field-dialog-size" class="size-input"></select>
-            <input id="field-dialog-color" type="color" class="color-input" />
+            <div class="color-input-wrap">
+              <div id="field-dialog-color-swatch" class="color-swatch" style="background:#000000"></div>
+              <input id="field-dialog-color" type="color" class="color-input" />
+              <span id="field-dialog-color-hex" class="color-hex">#000000</span>
+            </div>
           </div>
         </div>
         <div id="field-dialog-image-config" class="dialog-row dialog-image-config hidden">

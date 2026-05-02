@@ -242,16 +242,6 @@ body {
   max-width: none;
   transform-origin: top center;
 }
-.preview-container .docx img {
-  max-width: 100%;
-  height: auto;
-  display: inline;
-  vertical-align: baseline;
-}
-.preview-container .docx svg {
-  max-width: 100%;
-  height: auto;
-}
 
 /* docx-preview page cards: center them with page-like spacing */
 .preview-container .docx-wrapper > section.docx {
@@ -685,6 +675,27 @@ body {
   line-height: 1.5;
   white-space: pre-wrap;
 }
+.field-description-input {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text);
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  border-left: 2px solid var(--primary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  resize: vertical;
+  min-height: 28px;
+  font-family: inherit;
+}
+.field-description-input:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+  background: #fff;
+}
 
 /* Field summary tags (modify mode): name + delete button in one wrap */
 .field-tag-wrap {
@@ -942,14 +953,46 @@ body {
   font-weight: normal;
   font-style: italic;
 }
-.color-input {
-  width: 48px;
-  height: 30px;
-  padding: 2px;
+.color-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
+  padding: 3px 8px 3px 3px;
   background: #fff;
   cursor: pointer;
+  transition: border-color 0.15s;
+  position: relative;
+}
+.color-input-wrap:hover {
+  border-color: var(--border-strong);
+}
+.color-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.color-input {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+}
+.color-hex {
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-muted);
+  min-width: 52px;
+  text-transform: uppercase;
+  user-select: none;
 }
 .image-row {
   display: flex;
