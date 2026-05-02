@@ -333,7 +333,9 @@ function syncOccurrenceStyles() {
       if (existing[i]) {
         return { ...existing[i], name: r.name, sigil: r.sigil };
       }
-      return { name: r.name, sigil: r.sigil, font: null, size: null, sizeLabel: null, color: null };
+      // For new entries, use fieldMeta description as default
+      const meta = state.fieldMeta.get(r.name);
+      return { name: r.name, sigil: r.sigil, font: null, size: null, sizeLabel: null, color: null, description: meta?.description || null };
     });
     state.occurrenceStyles.set(p.index, next);
   }
@@ -803,6 +805,15 @@ async function insertAtSelection(type) {
 
   p.currentText = newText;
   p.dirty = newText !== p.originalText;
+
+  // Sync occurrence styles and store per-occurrence description
+  syncOccurrenceStyles();
+  const occStyles = state.occurrenceStyles.get(pIdx) || [];
+  const ranges = getPlaceholderRanges(newText, pIdx).filter((r) => r.managed);
+  const newOccIdx = ranges.findIndex((r) => r.name === name);
+  if (newOccIdx >= 0 && occStyles[newOccIdx]) {
+    occStyles[newOccIdx].description = description || null;
+  }
 
   renderParagraphList();
   updateFieldSummary();
@@ -1783,6 +1794,7 @@ function renderParagraphList() {
             size: result.defaultSize ?? null,
             sizeLabel: result.defaultSizeLabel || null,
             color: result.defaultColor || null,
+            description: result.description || null,
           };
           state.occurrenceStyles.set(p.index, styles);
         }
@@ -1811,6 +1823,24 @@ function renderParagraphList() {
         sel.start,
         sel.end,
       );
+      if (result.type === "image") {
+        const ranges = getPlaceholderRanges(p.currentText, p.index).filter((r) => r.managed);
+        const newToken = `{%${result.name}}`;
+        const idx = ranges.findIndex((r, i) => r.text === newToken && !(state.occurrenceStyles.get(p.index)?.[i]?.imageConfig));
+        if (idx >= 0) {
+          const styles = state.occurrenceStyles.get(p.index) || [];
+          styles[idx] = {
+            name: result.name,
+            sigil: "%",
+            font: null,
+            size: null,
+            sizeLabel: null,
+            color: null,
+            description: result.description || null,
+          };
+          state.occurrenceStyles.set(p.index, styles);
+        }
+      }
       updateFieldSummary();
     });
 

@@ -571,6 +571,8 @@ export function readFieldMeta(zip) {
       if (entry.pIdx == null || entry.occ == null) continue;
       if (!occStyles.has(entry.pIdx)) occStyles.set(entry.pIdx, []);
       const arr = occStyles.get(entry.pIdx);
+      // Fall back to fieldMeta description if occ entry has none
+      const fieldMeta = map.get(entry.name);
       arr[entry.occ] = {
         name: entry.name || null,
         sigil: entry.sigil || null,
@@ -578,7 +580,7 @@ export function readFieldMeta(zip) {
         size: entry.size ?? null,
         sizeLabel: entry.sizeLabel || null,
         color: entry.color || null,
-        description: entry.description || null,
+        description: entry.description || fieldMeta?.description || null,
       };
     }
     return { fieldMeta: map, occStyles };
