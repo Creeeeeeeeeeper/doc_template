@@ -15,9 +15,10 @@ import {
 // State
 // ============================================================
 const state = {
-  mode: "edit", // 'edit' | 'modify' | 'fill'
+  mode: "edit", // 'edit' | 'fill'
   templateBytes: null,
   filename: "",
+  isTemplateInput: false,
 
   // edit / modify mode (shared)
   paragraphs: [],
@@ -30,6 +31,17 @@ const state = {
   // Map<name, { type: 'text'|'image', description: string }>
   // Persisted into the docx as `template/fields.json`.
   fieldMeta: new Map(),
+
+  // Snapshot of placeholders that existed in the source text before editing.
+  // Used to avoid deleting literal text like {@name} that was already in doc.
+  // Map<paragraphIndex, Map<"@name"|"%name", count>>
+  originalPlaceholderBaseline: new Map(),
+
+  // Per-occurrence styling for placeholder tokens.
+  // Map<paragraphIndex, Array<{ font, size, sizeLabel, color }>>
+  // Each array entry corresponds to the Nth managed placeholder in that paragraph,
+  // in order of appearance in the text.
+  occurrenceStyles: new Map(),
 };
 
 const FALLBACK_FONTS = [
@@ -227,6 +239,8 @@ const PREVIEW_ZOOM_MAX = 2.5;
 const PREVIEW_ZOOM_STEP = 0.1;
 let previewScale = 1;
 let previewFitWidth = true;
+let previewRefreshTimer = null;
+let previewRefreshInFlight = false;
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
@@ -287,6 +301,260 @@ function setPreviewFitWidth() {
   applyPreviewZoom();
 }
 
+function buildOriginalPlaceholderBaseline() {
+  const baseline = new Map();
+  for (const p of state.paragraphs) {
+    const counts = new Map();
+    for (const m of p.originalText.matchAll(/\{([@%])(\w+)\}/g)) {
+      const key = `${m[1]}${m[2]}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    baseline.set(p.index, counts);
+  }
+  state.originalPlaceholderBaseline = baseline;
+  syncOccurrenceStyles();
+}
+
+function getTemplateFieldType(name) {
+  const meta = state.fieldMeta.get(name);
+  return meta?.type || null;
+}
+
+function syncOccurrenceStyles() {
+  for (const p of state.paragraphs) {
+    const ranges = getPlaceholderRanges(p.currentText, p.index).filter((r) => r.managed);
+    const existing = state.occurrenceStyles.get(p.index) || [];
+    const next = ranges.map((r, i) => {
+      if (existing[i]) {
+        return { ...existing[i], name: r.name, sigil: r.sigil };
+      }
+      return { name: r.name, sigil: r.sigil, font: null, size: null, sizeLabel: null, color: null };
+    });
+    state.occurrenceStyles.set(p.index, next);
+  }
+}
+
+function isPlaceholderTokenManaged(sigil, name, occurrenceInParagraph, paragraphIndex) {
+  const expectedType = sigil === "%" ? "image" : "text";
+  const metaType = getTemplateFieldType(name);
+  if (metaType !== expectedType) return false;
+  if (state.isTemplateInput) return true;
+  const baseline = state.originalPlaceholderBaseline.get(paragraphIndex) || new Map();
+  const protectedCount = baseline.get(`${sigil}${name}`) || 0;
+  return occurrenceInParagraph >= protectedCount;
+}
+
+function removeManagedPlaceholderFromText(text, sigil, name, protectedCount) {
+  const re = new RegExp(`\\{${escapeRegex(sigil)}${escapeRegex(name)}\\}`, "g");
+  let idx = 0;
+  return text.replace(re, (full) => {
+    const keep = idx < protectedCount;
+    idx += 1;
+    return keep ? full : "";
+  });
+}
+
+function getPlaceholderRanges(text, paragraphIndex) {
+  const seen = new Map();
+  const ranges = [];
+  const re = /\{([@%])(\w+)\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const sigil = m[1];
+    const name = m[2];
+    const key = `${sigil}${name}`;
+    const occ = seen.get(key) || 0;
+    seen.set(key, occ + 1);
+    ranges.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      text: m[0],
+      managed: isPlaceholderTokenManaged(sigil, name, occ, paragraphIndex),
+      sigil,
+      name,
+    });
+  }
+  return ranges;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function textToEditorHtml(text, paragraphIndex) {
+  const ranges = getPlaceholderRanges(text, paragraphIndex);
+  let out = "";
+  let cursor = 0;
+  for (const r of ranges) {
+    if (r.start > cursor) {
+      out += escapeHtml(text.slice(cursor, r.start));
+    }
+    if (r.managed) {
+      out += `<span class="placeholder-token ${r.sigil === "%" ? "image" : "text"}" contenteditable="false" data-token="1" data-sigil="${r.sigil}" data-name="${escapeHtml(r.name)}">${escapeHtml(r.text)}</span>`;
+    } else {
+      out += escapeHtml(r.text);
+    }
+    cursor = r.end;
+  }
+  if (cursor < text.length) out += escapeHtml(text.slice(cursor));
+  return out.replace(/\n/g, "<br>");
+}
+
+function editorTextContent(editor) {
+  let out = "";
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      out += node.textContent || "";
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    if (node.tagName === "BR") {
+      out += "\n";
+      return;
+    }
+    if ((node.tagName === "DIV" || node.tagName === "P") && node !== editor) {
+      if (out.length > 0 && !out.endsWith("\n")) out += "\n";
+    }
+    for (const child of node.childNodes) walk(child);
+  };
+  for (const child of editor.childNodes) walk(child);
+  return out;
+}
+
+function closeTokenContextMenu() {
+  const menu = document.getElementById("token-context-menu");
+  if (menu) menu.remove();
+}
+
+function getTokenOccurrenceIndex(editor, tokenNode) {
+  const tokens = editor.querySelectorAll("[data-token='1']");
+  let idx = 0;
+  for (const t of tokens) {
+    if (t === tokenNode) return idx;
+    idx++;
+  }
+  return -1;
+}
+
+let tokenTooltipTimer = null;
+let tokenTooltipEl = null;
+
+function removeTokenTooltip() {
+  if (tokenTooltipTimer) { clearTimeout(tokenTooltipTimer); tokenTooltipTimer = null; }
+  if (tokenTooltipEl) { tokenTooltipEl.remove(); tokenTooltipEl = null; }
+}
+
+function showTokenTooltip(tokenNode, paragraphIndex) {
+  removeTokenTooltip();
+  tokenTooltipTimer = setTimeout(() => {
+    const sigil = tokenNode.dataset.sigil;
+    const name = tokenNode.dataset.name;
+    const typeLabel = sigil === "%" ? "图片" : "文字";
+    const typeClass = sigil === "%" ? "image" : "text";
+    const occIdx = getTokenOccurrenceIndex(tokenNode.closest(".paragraph-editor"), tokenNode);
+    const styles = state.occurrenceStyles.get(paragraphIndex) || [];
+    const s = styles[occIdx] || {};
+
+    const el = document.createElement("div");
+    el.className = "token-tooltip";
+    let html = `<span class="tt-name">{${sigil}${name}}</span><span class="tt-type ${typeClass}">${typeLabel}</span>`;
+    if (typeClass === "text") {
+      const parts = [];
+      if (s.font) parts.push(`字体: ${s.font}`);
+      if (s.size) parts.push(`字号: ${s.size}pt`);
+      if (s.color) parts.push(`颜色: ${s.color}`);
+      if (parts.length > 0) html += `<div class="tt-style">${parts.join(" · ")}</div>`;
+    }
+    html += `<div class="tt-style">双击编辑 · 右键删除</div>`;
+    el.innerHTML = html;
+    document.body.appendChild(el);
+    tokenTooltipEl = el;
+
+    const rect = tokenNode.getBoundingClientRect();
+    el.style.left = `${rect.left}px`;
+    el.style.top = `${rect.bottom + 6}px`;
+  }, 500);
+}
+
+function openTokenContextMenu(x, y, onDelete) {
+  closeTokenContextMenu();
+  const menu = document.createElement("div");
+  menu.id = "token-context-menu";
+  menu.className = "token-context-menu";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "删除占位符";
+  btn.addEventListener("click", () => {
+    onDelete();
+    closeTokenContextMenu();
+  });
+  menu.appendChild(btn);
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  document.body.appendChild(menu);
+  setTimeout(() => {
+    const onDocClick = (ev) => {
+      if (!menu.contains(ev.target)) closeTokenContextMenu();
+      document.removeEventListener("mousedown", onDocClick, true);
+    };
+    document.addEventListener("mousedown", onDocClick, true);
+  }, 0);
+}
+
+function removeManagedTokenAtSelection(text, paragraphIndex, selStart, selEnd, key) {
+  const ranges = getPlaceholderRanges(text, paragraphIndex).filter((r) => r.managed);
+  if (ranges.length === 0) return null;
+
+  let targets = [];
+  if (selStart !== selEnd) {
+    targets = ranges.filter((r) => !(selEnd <= r.start || selStart >= r.end));
+  } else if (key === "Backspace") {
+    const pos = selStart;
+    targets = ranges.filter((r) => pos > r.start && pos <= r.end);
+  } else if (key === "Delete") {
+    const pos = selStart;
+    targets = ranges.filter((r) => pos >= r.start && pos < r.end);
+  }
+  if (targets.length === 0) return null;
+
+  targets.sort((a, b) => b.start - a.start);
+  let out = text;
+  for (const t of targets) {
+    out = out.slice(0, t.start) + out.slice(t.end);
+  }
+  const caret = Math.min(...targets.map((t) => t.start));
+  return { text: out, caret };
+}
+
+function schedulePreviewRefresh() {
+  if (!state.templateBytes || state.paragraphs.length === 0) return;
+  if (previewRefreshInFlight) return;
+  if (previewRefreshTimer) clearTimeout(previewRefreshTimer);
+  previewRefreshTimer = setTimeout(async () => {
+    previewRefreshTimer = null;
+    previewRefreshInFlight = true;
+    try {
+      syncFieldMetaFromText();
+      const updated = buildTemplate(
+        state.templateBytes,
+        state.paragraphs,
+        state.fieldMeta,
+        state.occurrenceStyles,
+      );
+      await renderPreview(updated);
+    } catch (e) {
+      console.error("auto preview refresh failed", e);
+    } finally {
+      previewRefreshInFlight = false;
+    }
+  }, 180);
+}
+
 // ============================================================
 // Utility
 // ============================================================
@@ -336,20 +604,15 @@ function basename(path) {
 // ============================================================
 // Mode switching
 // ============================================================
-// "edit" and "modify" share the same editor section — the difference is
-// only signposting (load button label, save button label, hint text).
-// "fill" uses a separate section.
-const EDITOR_LABELS = {
-  edit: { load: "选择文档 (.docx)", save: "保存为模板" },
-  modify: { load: "选择模板 (.docx)", save: "保存修改" },
-};
+// "edit" is for both plain docs and existing templates; we auto-detect which
+// one is loaded and adjust save behavior accordingly.
 
 function switchMode(mode) {
   state.mode = mode;
   els.tabs.forEach((t) =>
     t.classList.toggle("active", t.dataset.mode === mode),
   );
-  const isEditor = mode === "edit" || mode === "modify";
+  const isEditor = mode === "edit";
   els.modeEdit.classList.toggle("hidden", !isEditor);
   els.modeFill.classList.toggle("hidden", mode !== "fill");
   els.btnEditSave.classList.toggle("hidden", !isEditor);
@@ -358,11 +621,6 @@ function switchMode(mode) {
     els.previewZoomControls.classList.toggle("hidden", !isEditor);
   }
 
-  if (isEditor) {
-    const labels = EDITOR_LABELS[mode];
-    els.btnEditLoad.textContent = labels.load;
-    els.btnEditSave.textContent = labels.save;
-  }
   setStatus("");
 }
 
@@ -624,10 +882,10 @@ function clearActivePreview() {
     .forEach((p) => p.classList.remove("active"));
 }
 
-function autoResizeTextarea(textarea) {
-  if (!textarea) return;
-  textarea.style.height = "auto";
-  textarea.style.height = `${textarea.scrollHeight}px`;
+function autoResizeEditor(editor) {
+  if (!editor) return;
+  editor.style.height = "auto";
+  editor.style.height = `${editor.scrollHeight}px`;
 }
 
 function highlightPreview(idx) {
@@ -646,8 +904,8 @@ function focusEditCard(idx) {
   card.scrollIntoView({ behavior: "smooth", block: "center" });
   card.classList.add("highlighted");
   setTimeout(() => card.classList.remove("highlighted"), 1200);
-  const ta = card.querySelector("textarea");
-  if (ta) ta.focus();
+  const ed = card.querySelector(".paragraph-editor");
+  if (ed) ed.focus();
   highlightPreview(idx);
 }
 
@@ -718,16 +976,14 @@ function updateFieldSummary() {
         type: info.type,
         name,
         description: meta?.description || "",
-        defaultFont: meta?.defaultFont,
-        defaultSize: meta?.defaultSize,
-        defaultSizeLabel: meta?.defaultSizeLabel,
-        defaultColor: meta?.defaultColor,
         // Name is editable — submit handler validates & runs renameField.
         lockName: false,
         // Type can't change once placeholders exist in the doc, since
         // {@x} and {%x} are not interchangeable mid-document.
         lockType: info.used,
         existingName: name,
+        hideDescription: false,
+        hideFormat: true,
       });
       if (!updated) return;
 
@@ -738,10 +994,6 @@ function updateFieldSummary() {
       const finalMeta = {
         type: updated.type,
         description: updated.description,
-        defaultFont: updated.defaultFont || null,
-        defaultSize: updated.defaultSize ?? null,
-        defaultSizeLabel: updated.defaultSizeLabel || null,
-        defaultColor: updated.defaultColor || null,
       };
       state.fieldMeta.set(updated.name, finalMeta);
 
@@ -774,16 +1026,58 @@ function updateFieldSummary() {
   }
 }
 
-function insertAtCursor(textarea, snippet) {
-  const start = textarea.selectionStart ?? textarea.value.length;
-  const end = textarea.selectionEnd ?? textarea.value.length;
-  const before = textarea.value.slice(0, start);
-  const after = textarea.value.slice(end);
-  textarea.value = before + snippet + after;
-  const cursor = start + snippet.length;
-  textarea.selectionStart = textarea.selectionEnd = cursor;
-  textarea.focus();
-  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+function placeCaretAtTextOffset(root, offset) {
+  const sel = window.getSelection();
+  if (!sel) return;
+  let remain = Math.max(0, offset);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = null;
+  while ((node = walker.nextNode())) {
+    const len = node.textContent?.length || 0;
+    if (remain <= len) {
+      const r = document.createRange();
+      r.setStart(node, remain);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return;
+    }
+    remain -= len;
+  }
+  const r = document.createRange();
+  r.selectNodeContents(root);
+  r.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+function getEditorSelectionOffsets(editor) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    const t = editorTextContent(editor);
+    return { start: t.length, end: t.length };
+  }
+  const range = sel.getRangeAt(0);
+  if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+    const t = editorTextContent(editor);
+    return { start: t.length, end: t.length };
+  }
+  const a = getCharOffsetWithin(editor, range.startContainer, range.startOffset) ?? 0;
+  const b = getCharOffsetWithin(editor, range.endContainer, range.endOffset) ?? a;
+  return a <= b ? { start: a, end: b } : { start: b, end: a };
+}
+
+function insertAtCursor(editor, snippet, paragraphIndex, overrideStart, overrideEnd) {
+  const offsets = (overrideStart != null && overrideEnd != null)
+    ? { start: overrideStart, end: overrideEnd }
+    : getEditorSelectionOffsets(editor);
+  const { start, end } = offsets;
+  const oldText = editorTextContent(editor);
+  const next = oldText.slice(0, start) + snippet + oldText.slice(end);
+  editor.innerHTML = textToEditorHtml(next, paragraphIndex);
+  placeCaretAtTextOffset(editor, start + snippet.length);
+  editor.focus();
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 // ============================================================
@@ -829,8 +1123,13 @@ function renameField(oldName, newName) {
       touched = true;
     }
   }
-  // Transfer metadata key (preserve insertion order isn't guaranteed but
-  // updateFieldSummary doesn't rely on it).
+  // Update name in occurrence styles
+  for (const [, styles] of state.occurrenceStyles) {
+    for (const s of styles) {
+      if (s && s.name === oldName) s.name = newName;
+    }
+  }
+  // Transfer metadata key
   const meta = state.fieldMeta.get(oldName);
   state.fieldMeta.delete(oldName);
   if (meta) state.fieldMeta.set(newName, meta);
@@ -840,16 +1139,21 @@ function renameField(oldName, newName) {
 // Delete a field: strip {@name} / {%name} from every paragraph and drop
 // the metadata entry. Returns true if anything changed.
 function deleteField(name) {
-  const re = new RegExp(`\\{[@%]${escapeRegex(name)}\\}`, "g");
   let touched = false;
   for (const p of state.paragraphs) {
-    const next = p.currentText.replace(re, "");
+    const baseline = state.originalPlaceholderBaseline.get(p.index) || new Map();
+    const keepTextCount = baseline.get(`@${name}`) || 0;
+    const keepImageCount = baseline.get(`%${name}`) || 0;
+    let next = p.currentText;
+    next = removeManagedPlaceholderFromText(next, "@", name, keepTextCount);
+    next = removeManagedPlaceholderFromText(next, "%", name, keepImageCount);
     if (next !== p.currentText) {
       p.currentText = next;
       p.dirty = next !== p.originalText;
       touched = true;
     }
   }
+  if (touched) syncOccurrenceStyles();
   if (state.fieldMeta.delete(name)) touched = true;
   return touched;
 }
@@ -911,6 +1215,8 @@ async function openFieldDialog(defaults = {}) {
     title = "添加字段",
     lockType = false,
     lockName = false,
+    hideDescription = false,
+    hideFormat = false,
     // When set, this dialog is editing an existing field; the submit
     // handler must allow `name` to equal `existingName` even though that
     // name is "already taken" (it's just unchanged), and warn before
@@ -933,6 +1239,8 @@ async function openFieldDialog(defaults = {}) {
     fieldDialogEls.name.value = name;
     fieldDialogEls.name.disabled = lockName;
     fieldDialogEls.desc.value = description;
+    const descRow = fieldDialogEls.desc.closest(".dialog-row");
+    if (descRow) descRow.classList.toggle("hidden", hideDescription);
     fieldDialogEls.hint.textContent = "";
     fieldDialogEls.hint.classList.remove("exists");
 
@@ -952,14 +1260,14 @@ async function openFieldDialog(defaults = {}) {
     fieldDialogEls.formatDetected.textContent = detectedFromXml
       ? "（已从光标位置自动读取）"
       : "";
-    fieldDialogEls.format.classList.toggle("hidden", type === "image");
+    fieldDialogEls.format.classList.toggle("hidden", type === "image" || hideFormat);
 
     let descTouched = !!description;
 
     function onTypeChange() {
       fieldDialogEls.format.classList.toggle(
         "hidden",
-        fieldDialogEls.type.value === "image",
+        fieldDialogEls.type.value === "image" || hideFormat,
       );
     }
     function onNameInput() {
@@ -1145,7 +1453,6 @@ function createFontPicker(fonts, initialValue, onChange) {
     if (el) el.scrollIntoView({ block: "nearest" });
   }
 
-  input.addEventListener("focus", openList);
   input.addEventListener("click", openList);
   input.addEventListener("blur", () => setTimeout(closeList, 150));
   input.addEventListener("input", () => {
@@ -1206,29 +1513,145 @@ function renderParagraphList() {
     const body = document.createElement("div");
     body.className = "paragraph-body";
 
-    const ta = document.createElement("textarea");
-    ta.className = "paragraph-textarea";
-    ta.value = p.currentText;
-    ta.placeholder = "(空段落)";
+    const ed = document.createElement("div");
+    ed.className = "paragraph-editor";
+    ed.contentEditable = "true";
+    ed.spellcheck = false;
+    ed.dataset.pIdx = String(p.index);
+    ed.innerHTML = textToEditorHtml(p.currentText, p.index);
+    let savedSel = { start: 0, end: 0 };
 
-    ta.addEventListener("input", () => {
-      p.currentText = ta.value;
+    function saveEditorSelection() {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && ed.contains(sel.getRangeAt(0).startContainer)) {
+        savedSel = getEditorSelectionOffsets(ed);
+      }
+    }
+
+    ed.addEventListener("input", () => {
+      p.currentText = editorTextContent(ed);
       p.dirty = p.currentText !== p.originalText;
       card.classList.toggle("dirty", p.dirty);
       card.classList.toggle(
         "has-placeholder",
-        /\{[@%]\w+\}/.test(p.currentText),
+        getPlaceholderRanges(p.currentText, p.index).some((x) => x.managed),
       );
-      autoResizeTextarea(ta);
+      const nextHtml = textToEditorHtml(p.currentText, p.index);
+      if (ed.innerHTML !== nextHtml) {
+        const { start } = getEditorSelectionOffsets(ed);
+        ed.innerHTML = nextHtml;
+        placeCaretAtTextOffset(ed, start);
+      }
+      autoResizeEditor(ed);
       syncFieldMetaFromText();
+      syncOccurrenceStyles();
       updateFieldSummary();
+      schedulePreviewRefresh();
     });
 
-    ta.addEventListener("focus", () => highlightPreview(p.index));
+    ed.addEventListener("focus", () => highlightPreview(p.index));
+    ed.addEventListener("blur", () => {
+      saveEditorSelection();
+      clearActivePreview();
+    });
+    ed.addEventListener("keyup", saveEditorSelection);
+    ed.addEventListener("mouseup", saveEditorSelection);
 
-    body.appendChild(ta);
-    // Measure after mounted; detached textarea may report incorrect scrollHeight.
-    requestAnimationFrame(() => autoResizeTextarea(ta));
+    ed.addEventListener("mouseover", (e) => {
+      const token = e.target.closest?.("[data-token='1']");
+      if (token && ed.contains(token)) {
+        showTokenTooltip(token, p.index);
+      }
+    });
+    ed.addEventListener("mouseout", (e) => {
+      const token = e.target.closest?.("[data-token='1']");
+      if (token && ed.contains(token)) {
+        removeTokenTooltip();
+      }
+    });
+
+    ed.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        document.execCommand("insertLineBreak");
+        return;
+      }
+      if (e.key !== "Backspace" && e.key !== "Delete") return;
+      const { start, end } = getEditorSelectionOffsets(ed);
+      const res = removeManagedTokenAtSelection(p.currentText, p.index, start, end, e.key);
+      if (!res) return;
+      e.preventDefault();
+      p.currentText = res.text;
+      ed.innerHTML = textToEditorHtml(res.text, p.index);
+      placeCaretAtTextOffset(ed, res.caret);
+      ed.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    ed.addEventListener("contextmenu", (e) => {
+      const token = e.target.closest?.("[data-token='1']");
+      if (!token || !ed.contains(token)) return;
+      e.preventDefault();
+      const occurrenceIdx = getTokenOccurrenceIndex(ed, token);
+      openTokenContextMenu(e.clientX, e.clientY, () => {
+        const ranges = getPlaceholderRanges(p.currentText, p.index).filter((r) => r.managed);
+        if (occurrenceIdx < 0 || occurrenceIdx >= ranges.length) return;
+        const target = ranges[occurrenceIdx];
+        p.currentText = p.currentText.slice(0, target.start) + p.currentText.slice(target.end);
+        syncOccurrenceStyles();
+        ed.innerHTML = textToEditorHtml(p.currentText, p.index);
+        placeCaretAtTextOffset(ed, target.start);
+        ed.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    });
+
+    ed.addEventListener("dblclick", async (e) => {
+      const token = e.target.closest?.("[data-token='1']");
+      if (!token || !ed.contains(token)) return;
+      const sigil = token.dataset.sigil;
+      const name = token.dataset.name;
+      const occurrenceIdx = getTokenOccurrenceIndex(ed, token);
+      const styles = state.occurrenceStyles.get(p.index) || [];
+      const curStyle = styles[occurrenceIdx] || {};
+      const detected = getRunStyleAt(p.originalXml, savedSel.start);
+      const result = await openFieldDialog({
+        title: `编辑占位符 {${sigil}${name}}`,
+        type: sigil === "%" ? "image" : "text",
+        name,
+        description: (state.fieldMeta.get(name)?.description) || "",
+        defaultFont: curStyle.font || detected?.font || null,
+        defaultSize: curStyle.size ?? detected?.size ?? null,
+        defaultSizeLabel: curStyle.sizeLabel || (curStyle.size != null ? findSizeByValue(curStyle.size)?.label : null) || null,
+        defaultColor: curStyle.color || detected?.color || null,
+        detectedFromXml: !curStyle.font && !!detected,
+        lockType: true,
+        lockName: false,
+        existingName: name,
+        hideDescription: true,
+      });
+      if (!result) return;
+      // If name changed, do a full rename across all paragraphs
+      if (result.name !== name) {
+        renameField(name, result.name);
+        syncOccurrenceStyles();
+        ed.innerHTML = textToEditorHtml(p.currentText, p.index);
+      }
+      if (occurrenceIdx >= 0 && occurrenceIdx < styles.length) {
+        styles[occurrenceIdx] = {
+          ...styles[occurrenceIdx],
+          name: result.name,
+          font: result.defaultFont || null,
+          size: result.defaultSize ?? null,
+          sizeLabel: result.defaultSizeLabel || null,
+          color: result.defaultColor || null,
+        };
+        state.occurrenceStyles.set(p.index, styles);
+      }
+      updateFieldSummary();
+      schedulePreviewRefresh();
+    });
+
+    body.appendChild(ed);
+    requestAnimationFrame(() => autoResizeEditor(ed));
 
     const actions = document.createElement("div");
     actions.className = "paragraph-actions";
@@ -1238,9 +1661,8 @@ function renderParagraphList() {
     btnText.className = "btn-mini";
     btnText.textContent = "+ 文字字段";
     btnText.addEventListener("click", async () => {
-      const ss = ta.selectionStart;
-      const se = ta.selectionEnd;
-      const detected = getRunStyleAt(p.originalXml, ss);
+      const sel = savedSel;
+      const detected = getRunStyleAt(p.originalXml, sel.start);
       const result = await openFieldDialog({
         type: "text",
         defaultFont: detected?.font,
@@ -1252,18 +1674,32 @@ function renderParagraphList() {
       state.fieldMeta.set(result.name, {
         type: result.type,
         description: result.description,
-        defaultFont: result.defaultFont || null,
-        defaultSize: result.defaultSize ?? null,
-        defaultSizeLabel: result.defaultSizeLabel || null,
-        defaultColor: result.defaultColor || null,
       });
-      ta.focus();
-      ta.selectionStart = ss;
-      ta.selectionEnd = se;
+      ed.focus();
       insertAtCursor(
-        ta,
+        ed,
         result.type === "image" ? `{%${result.name}}` : `{@${result.name}}`,
+        p.index,
+        sel.start,
+        sel.end,
       );
+      if (result.type === "text") {
+        const ranges = getPlaceholderRanges(p.currentText, p.index).filter((r) => r.managed);
+        const newToken = `{@${result.name}}`;
+        const idx = ranges.findIndex((r, i) => r.text === newToken && !(state.occurrenceStyles.get(p.index)?.[i]?.font));
+        if (idx >= 0) {
+          const styles = state.occurrenceStyles.get(p.index) || [];
+          styles[idx] = {
+            name: result.name,
+            sigil: "@",
+            font: result.defaultFont || null,
+            size: result.defaultSize ?? null,
+            sizeLabel: result.defaultSizeLabel || null,
+            color: result.defaultColor || null,
+          };
+          state.occurrenceStyles.set(p.index, styles);
+        }
+      }
       updateFieldSummary();
     });
 
@@ -1272,20 +1708,20 @@ function renderParagraphList() {
     btnImg.className = "btn-mini image";
     btnImg.textContent = "+ 图片字段";
     btnImg.addEventListener("click", async () => {
-      const ss = ta.selectionStart;
-      const se = ta.selectionEnd;
+      const sel = savedSel;
       const result = await openFieldDialog({ type: "image" });
       if (!result) return;
       state.fieldMeta.set(result.name, {
         type: result.type,
         description: result.description,
       });
-      ta.focus();
-      ta.selectionStart = ss;
-      ta.selectionEnd = se;
+      ed.focus();
       insertAtCursor(
-        ta,
+        ed,
         result.type === "image" ? `{%${result.name}}` : `{@${result.name}}`,
+        p.index,
+        sel.start,
+        sel.end,
       );
       updateFieldSummary();
     });
@@ -1297,14 +1733,17 @@ function renderParagraphList() {
     btnReset.addEventListener("click", () => {
       p.currentText = p.originalText;
       p.dirty = false;
-      ta.value = p.originalText;
+      ed.innerHTML = textToEditorHtml(p.originalText, p.index);
       card.classList.remove("dirty");
       card.classList.toggle(
         "has-placeholder",
-        /\{[@%]\w+\}/.test(p.currentText),
+        getPlaceholderRanges(p.currentText, p.index).some((x) => x.managed),
       );
-      autoResizeTextarea(ta);
+      state.occurrenceStyles.delete(p.index);
+      syncOccurrenceStyles();
+      autoResizeEditor(ed);
       updateFieldSummary();
+      schedulePreviewRefresh();
     });
 
     actions.append(btnText, btnImg, btnReset);
@@ -1319,7 +1758,7 @@ function renderParagraphList() {
     body.appendChild(actions);
 
     card.appendChild(body);
-    if (/\{[@%]\w+\}/.test(p.currentText)) {
+    if (getPlaceholderRanges(p.currentText, p.index).some((r) => r.managed)) {
       card.classList.add("has-placeholder");
     }
     els.paragraphList.appendChild(card);
@@ -1327,7 +1766,7 @@ function renderParagraphList() {
 }
 
 async function editLoad() {
-  const path = await pickDocx("选择文档");
+  const path = await pickDocx("选择文档或模板");
   if (!path) return;
   try {
     const bytes = await readBytesFromPath(path);
@@ -1335,9 +1774,14 @@ async function editLoad() {
     state.templateBytes = bytes;
     state.filename = basename(path);
     state.paragraphs = parseParagraphs(zip);
-    state.fieldMeta = readFieldMeta(zip);
+    buildOriginalPlaceholderBaseline();
+    const { fieldMeta, occStyles } = readFieldMeta(zip);
+    state.fieldMeta = fieldMeta;
+    state.occurrenceStyles = occStyles;
+    state.isTemplateInput = !!zip.file("template/fields.json");
     syncFieldMetaFromText();
     els.editFilename.textContent = state.filename;
+    els.btnEditSave.textContent = state.isTemplateInput ? "保存修改" : "保存为模板";
     setStatus(`已加载，共 ${state.paragraphs.length} 段，正在渲染预览…`);
 
     renderParagraphList();
@@ -1363,26 +1807,19 @@ async function editSave() {
       state.templateBytes,
       state.paragraphs,
       state.fieldMeta,
+      state.occurrenceStyles,
     );
-    // In modify mode the input is already a template; default to overwriting
-    // it (Tauri's save dialog still prompts on collision). In edit mode we
-    // append -template so the original docx isn't replaced.
+    // If the input is already a template, default to overwriting it
+    // (Tauri save dialog still prompts on collision). Otherwise append
+    // -template so the original docx isn't replaced.
     const stem = state.filename.replace(/\.docx$/i, "");
-    const suggested =
-      state.mode === "modify"
-        ? state.filename
-        : stem + "-template.docx";
+    const suggested = state.isTemplateInput ? state.filename : stem + "-template.docx";
     const target = await saveBytesViaDialog(suggested, out);
     if (!target) {
       setStatus("已取消保存");
       return;
     }
-    setStatus(
-      state.mode === "modify"
-        ? "已保存修改：" + target
-        : "已保存模板：" + target,
-      "success",
-    );
+    setStatus(state.isTemplateInput ? "已保存修改：" + target : "已保存模板：" + target, "success");
   } catch (e) {
     console.error(e);
     setStatus("保存失败：" + (e?.message || e), "error");
@@ -1398,6 +1835,7 @@ async function refreshPreview() {
       state.templateBytes,
       state.paragraphs,
       state.fieldMeta,
+      state.occurrenceStyles,
     );
     await renderPreview(updated);
     const dirty = state.paragraphs.filter((p) => p.dirty).length;
@@ -1460,7 +1898,9 @@ async function fillLoad() {
     state.templateBytes = bytes;
     state.filename = basename(path);
     state.fields = extractFieldsFromZip(zip);
-    state.fieldMeta = readFieldMeta(zip);
+    const { fieldMeta, occStyles } = readFieldMeta(zip);
+    state.fieldMeta = fieldMeta;
+    state.occurrenceStyles = occStyles;
     state.values = {};
     els.fillFilename.textContent = state.filename;
     setStatus(`已加载模板，发现 ${state.fields.length} 个字段`);
@@ -1499,129 +1939,78 @@ async function renderForm() {
 
   const fonts = await getFonts();
 
-  for (const field of state.fields) {
-    const card = document.createElement("div");
-    card.className = "field-card";
-
-    const head = document.createElement("div");
-    head.className = "field-head";
-    head.innerHTML = `<span class="field-name">${field.name}</span><span class="field-type ${field.type}">${field.type}</span>`;
-    card.appendChild(head);
-
-    // Show the stored description (if any) right under the head
-    const meta = state.fieldMeta.get(field.name);
-    if (meta?.description) {
-      const desc = document.createElement("div");
-      desc.className = "field-description";
-      desc.textContent = meta.description;
-      card.appendChild(desc);
+  // Group occurrences by field name for fill mode
+  const fieldOccMap = new Map(); // name -> [{font, size, sizeLabel, color}, ...]
+  for (const [, styles] of state.occurrenceStyles) {
+    for (const entry of styles) {
+      if (!entry || !entry.name) continue;
+      if (!fieldOccMap.has(entry.name)) fieldOccMap.set(entry.name, []);
+      fieldOccMap.get(entry.name).push({
+        font: entry.font || null,
+        size: entry.size ?? null,
+        sizeLabel: entry.sizeLabel || null,
+        color: entry.color || null,
+      });
     }
+  }
+
+  // Deduplicate field list by name
+  const seen = new Set();
+  const uniqueFields = [];
+  for (const f of state.fields) {
+    if (seen.has(f.name)) continue;
+    seen.add(f.name);
+    uniqueFields.push(f);
+  }
+
+  for (const field of uniqueFields) {
+    const meta = state.fieldMeta.get(field.name);
 
     if (field.type === "text") {
-      const m = state.fieldMeta.get(field.name);
-      const defFont = m?.defaultFont || "宋体";
-      const defSize = m?.defaultSize ?? 12;
-      const defSizeLabel =
-        m?.defaultSizeLabel ||
-        (m?.defaultSize != null ? findSizeByValue(m.defaultSize)?.label : null) ||
-        "小四";
-      const defColor = m?.defaultColor || "#000000";
-
-      const v =
-        state.values[field.name] || {
-          text: "",
-          font: defFont,
-          sizeLabel: defSizeLabel,
-          size: defSize,
-          color: defColor,
-        };
-      if (v.size && !v.sizeLabel) {
-        v.sizeLabel = findSizeByValue(v.size)?.label ?? String(v.size);
-      }
+      const v = state.values[field.name] || { text: "" };
       state.values[field.name] = v;
+      const occs = fieldOccMap.get(field.name) || [];
 
-      const ta = document.createElement("textarea");
-      ta.className = "input text-input";
-      ta.placeholder = "在此输入文字（支持换行）";
-      ta.rows = 2;
-      ta.value = v.text;
-      ta.addEventListener("input", () => (v.text = ta.value));
-
-      const controls = document.createElement("div");
-      controls.className = "controls";
-
-      // Font: searchable custom dropdown (avoids Chromium <datalist> popup
-      // that only shows ~4 items and is hard to scroll on long font lists)
-      const fontPicker = createFontPicker(fonts, v.font, (val) => {
-        v.font = val.trim() || "Calibri";
-      });
-
-      // Size: optgroup'd select with both 初号..八号 and numeric pt values
-      const sizeSel = document.createElement("select");
-      sizeSel.className = "input size-input";
-
-      const zhGroup = document.createElement("optgroup");
-      zhGroup.label = "字号";
-      for (const s of SIZE_PRESETS_ZH) {
-        const opt = document.createElement("option");
-        opt.value = s.label;
-        opt.textContent = s.label;
-        opt.dataset.pt = String(s.value);
-        if (s.label === v.sizeLabel) opt.selected = true;
-        zhGroup.appendChild(opt);
+      // If only one or no occurrences, render a single card
+      if (occs.length <= 1) {
+        const card = createFillFieldCard(field.name, field.type, meta?.description, null);
+        const ta = createFillTextarea(v);
+        card.appendChild(ta);
+        if (occs.length === 1) {
+          card.appendChild(createFillStyleControls(fonts, occs, 0));
+        }
+        els.formSection.appendChild(card);
+      } else {
+        // Multiple occurrences: each gets its own card with synced text
+        const allTas = [];
+        for (let i = 0; i < occs.length; i++) {
+          const card = createFillFieldCard(field.name, field.type, meta?.description, `${i + 1}/${occs.length}`);
+          const ta = createFillTextarea(v);
+          ta.addEventListener("input", () => {
+            // Sync all other textareas
+            for (const other of allTas) {
+              if (other !== ta) other.value = ta.value;
+            }
+          });
+          allTas.push(ta);
+          card.appendChild(ta);
+          card.appendChild(createFillStyleControls(fonts, occs, i));
+          els.formSection.appendChild(card);
+        }
       }
-
-      const numGroup = document.createElement("optgroup");
-      numGroup.label = "磅值";
-      for (const s of SIZE_PRESETS_NUM) {
-        const opt = document.createElement("option");
-        opt.value = s.label;
-        opt.textContent = s.label;
-        opt.dataset.pt = String(s.value);
-        if (s.label === v.sizeLabel) opt.selected = true;
-        numGroup.appendChild(opt);
-      }
-      sizeSel.append(zhGroup, numGroup);
-
-      sizeSel.addEventListener("change", () => {
-        const opt = sizeSel.options[sizeSel.selectedIndex];
-        v.sizeLabel = opt.value;
-        v.size = Number(opt.dataset.pt);
-      });
-
-      const colorInp = document.createElement("input");
-      colorInp.type = "color";
-      colorInp.className = "color-input";
-      colorInp.value = v.color;
-      colorInp.addEventListener("input", () => (v.color = colorInp.value));
-
-      controls.append(
-        labeled("字体", fontPicker.wrap),
-        labeled("字号", sizeSel),
-        labeled("颜色", colorInp),
-      );
-
-      card.appendChild(ta);
-      card.appendChild(controls);
     } else {
-      const v = state.values[field.name] || {
-        bytes: null,
-        mime: "",
-        filename: "",
-      };
+      const card = createFillFieldCard(field.name, field.type, meta?.description, null);
+      const v = state.values[field.name] || { bytes: null, mime: "", filename: "" };
       state.values[field.name] = v;
 
       const row = document.createElement("div");
       row.className = "image-row";
-
       const fileInp = document.createElement("input");
       fileInp.type = "file";
       fileInp.accept = "image/png,image/jpeg,image/gif";
-
       const preview = document.createElement("span");
       preview.className = "image-preview-name";
       preview.textContent = v.filename || "尚未选择图片";
-
       fileInp.addEventListener("change", async () => {
         const f = fileInp.files?.[0];
         if (!f) return;
@@ -1630,14 +2019,92 @@ async function renderForm() {
         v.filename = f.name;
         preview.textContent = f.name;
       });
-
       row.append(fileInp, preview);
       card.appendChild(row);
+      els.formSection.appendChild(card);
     }
-
-    els.formSection.appendChild(card);
   }
   els.btnFillExport.disabled = false;
+}
+
+function createFillFieldCard(name, type, description, occLabel) {
+  const card = document.createElement("div");
+  card.className = "field-card";
+  const head = document.createElement("div");
+  head.className = "field-head";
+  head.innerHTML = `<span class="field-name">${name}</span><span class="field-type ${type}">${type}</span>` +
+    (occLabel ? `<span class="field-occ-label">样式 ${occLabel}</span>` : "");
+  card.appendChild(head);
+  if (description) {
+    const desc = document.createElement("div");
+    desc.className = "field-description";
+    desc.textContent = description;
+    card.appendChild(desc);
+  }
+  return card;
+}
+
+function createFillTextarea(v) {
+  const ta = document.createElement("textarea");
+  ta.className = "input text-input";
+  ta.placeholder = "在此输入文字（支持换行）";
+  ta.rows = 2;
+  ta.value = v.text;
+  ta.addEventListener("input", () => (v.text = ta.value));
+  return ta;
+}
+
+function createFillStyleControls(fonts, occs, idx) {
+  const wrap = document.createElement("div");
+  wrap.className = "controls";
+  const o = occs[idx];
+
+  const fontPicker = createFontPicker(fonts, o.font || "宋体", (val) => {
+    o.font = val.trim() || "Calibri";
+  });
+
+  const sizeSel = document.createElement("select");
+  sizeSel.className = "input size-input";
+  const zhGroup = document.createElement("optgroup");
+  zhGroup.label = "字号";
+  for (const s of SIZE_PRESETS_ZH) {
+    const opt = document.createElement("option");
+    opt.value = s.label;
+    opt.textContent = s.label;
+    opt.dataset.pt = String(s.value);
+    zhGroup.appendChild(opt);
+  }
+  const numGroup = document.createElement("optgroup");
+  numGroup.label = "磅值";
+  for (const s of SIZE_PRESETS_NUM) {
+    const opt = document.createElement("option");
+    opt.value = s.label;
+    opt.textContent = s.label;
+    opt.dataset.pt = String(s.value);
+    numGroup.appendChild(opt);
+  }
+  sizeSel.append(zhGroup, numGroup);
+  const sl = o.sizeLabel || (o.size != null ? findSizeByValue(o.size)?.label : null) || "小四";
+  sizeSel.value = sl;
+  if (sizeSel.selectedIndex < 0) sizeSel.value = "小四";
+  sizeSel.addEventListener("change", () => {
+    const opt = sizeSel.options[sizeSel.selectedIndex];
+    o.sizeLabel = opt.value;
+    o.size = Number(opt.dataset.pt);
+  });
+
+  const colorInp = document.createElement("input");
+  colorInp.type = "color";
+  colorInp.className = "color-input";
+  colorInp.value = o.color || "#000000";
+  colorInp.addEventListener("input", () => (o.color = colorInp.value));
+
+  wrap.append(
+    labeled("字体", fontPicker.wrap),
+    labeled("字号", sizeSel),
+    labeled("颜色", colorInp),
+  );
+  return wrap;
 }
 
 async function fillExport() {
@@ -1645,20 +2112,32 @@ async function fillExport() {
   setStatus("生成中…");
   try {
     const values = {};
+    const occStyleMap = new Map(); // name -> [{font, size, color}, ...]
+
+    // Build occStyleMap from occurrenceStyles (entries include name)
+    for (const [, styles] of state.occurrenceStyles) {
+      for (const entry of styles) {
+        if (!entry || !entry.name) continue;
+        if (!occStyleMap.has(entry.name)) occStyleMap.set(entry.name, []);
+        occStyleMap.get(entry.name).push({
+          font: entry.font || "宋体",
+          size: entry.size ?? 12,
+          color: entry.color || "#000000",
+        });
+      }
+    }
+
     for (const f of state.fields) {
       const v = state.values[f.name];
       if (f.type === "text") {
         values[f.name] = {
           text: v?.text ?? "",
-          font: v?.font || "Calibri",
-          size: v?.size || 12,
-          color: v?.color || "#000000",
         };
       } else {
         values[f.name] = { bytes: v?.bytes };
       }
     }
-    const out = renderFilled(state.templateBytes, state.fields, values);
+    const out = renderFilled(state.templateBytes, state.fields, values, occStyleMap);
     const suggested = state.filename.replace(/\.docx$/i, "") + "-filled.docx";
     const target = await saveBytesViaDialog(suggested, out);
     if (!target) {

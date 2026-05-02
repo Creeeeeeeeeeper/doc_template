@@ -190,6 +190,7 @@ function buildRPr({ font, size, color }) {
 // {@field} with {field} for docxtemplater's standard substitution.
 export function preprocessTemplateForFill(zip, styleMap) {
   let xml = zip.file("word/document.xml").asText();
+  const occurrenceCount = {};
 
   xml = xml.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (run) => {
     if (!/\{@\w+\}/.test(run)) return run;
@@ -221,7 +222,16 @@ export function preprocessTemplateForFill(zip, styleMap) {
         if (p.value.length === 0) continue;
         out += `<w:r>${rPrOriginal}<w:t xml:space="preserve">${p.value}</w:t></w:r>`;
       } else {
-        const styledRPr = buildRPr(styleMap[p.name] || {});
+        const occ = occurrenceCount[p.name] || 0;
+        occurrenceCount[p.name] = occ + 1;
+        const entry = styleMap[p.name];
+        let style;
+        if (Array.isArray(entry)) {
+          style = entry[occ] || entry[0] || {};
+        } else {
+          style = entry || {};
+        }
+        const styledRPr = buildRPr(style);
         out += `<w:r>${styledRPr}<w:t xml:space="preserve">{${p.name}}</w:t></w:r>`;
       }
     }
@@ -237,7 +247,7 @@ export function preprocessTemplateForFill(zip, styleMap) {
 // values: { fieldName: { type:'text', text, font, size, color } |
 //                       { type:'image', bytes: Uint8Array } }
 // Returns Uint8Array of the rendered docx bytes.
-export function renderFilled(templateBytes, fields, values) {
+export function renderFilled(templateBytes, fields, values, occStyleMap) {
   const zip = new PizZip(templateBytes);
 
   // Strip editor-only metadata; the filled doc has no use for it, and a
@@ -249,12 +259,16 @@ export function renderFilled(templateBytes, fields, values) {
   const styleMap = {};
   for (const f of fields) {
     if (f.type === "text") {
-      const v = values[f.name];
-      styleMap[f.name] = {
-        font: v?.font || "Calibri",
-        size: v?.size || 12,
-        color: v?.color || "#000000",
-      };
+      if (occStyleMap && occStyleMap.has(f.name)) {
+        styleMap[f.name] = occStyleMap.get(f.name);
+      } else {
+        const v = values[f.name];
+        styleMap[f.name] = {
+          font: v?.font || "Calibri",
+          size: v?.size || 12,
+          color: v?.color || "#000000",
+        };
+      }
     }
   }
   preprocessTemplateForFill(zip, styleMap);
@@ -374,22 +388,49 @@ function ensureJsonContentType(zip) {
 // ----------------------------------------------------------------
 // Update the buildTemplate fieldMeta serialization to include default format.
 // (See `default*` fields in the JSON below.)
-export function buildTemplate(templateBytes, paragraphs, fieldMeta) {
+export function buildTemplate(templateBytes, paragraphs, fieldMeta, occurrenceStyles) {
   const zip = new PizZip(templateBytes);
   applyParagraphEdits(zip, paragraphs);
 
   if (fieldMeta && fieldMeta.size > 0) {
+    const occEntries = [];
+    if (occurrenceStyles) {
+      for (const [pIdx, styles] of occurrenceStyles) {
+        const pText = paragraphs[pIdx]?.currentText ?? "";
+        const re = /\{([@%])(\w+)\}/g;
+        let occ = 0;
+        let m;
+        while ((m = re.exec(pText)) !== null) {
+          const sigil = m[1];
+          const name = m[2];
+          const meta = fieldMeta.get(name);
+          if (!meta) continue;
+          const expectedType = sigil === "%" ? "image" : "text";
+          if (meta.type !== expectedType) continue;
+          if (styles[occ]) {
+            occEntries.push({
+              pIdx,
+              occ,
+              name,
+              sigil,
+              font: styles[occ].font || null,
+              size: styles[occ].size ?? null,
+              sizeLabel: styles[occ].sizeLabel || null,
+              color: styles[occ].color || null,
+            });
+          }
+          occ++;
+        }
+      }
+    }
     const data = {
-      version: 2,
+      version: 3,
       fields: [...fieldMeta.entries()].map(([name, m]) => ({
         name,
         type: m.type || "text",
         description: m.description || "",
-        defaultFont: m.defaultFont || null,
-        defaultSize: m.defaultSize ?? null,
-        defaultSizeLabel: m.defaultSizeLabel || null,
-        defaultColor: m.defaultColor || null,
       })),
+      occStyles: occEntries,
     };
     zip.file("template/fields.json", JSON.stringify(data, null, 2));
     ensureJsonContentType(zip);
@@ -402,7 +443,7 @@ export function buildTemplate(templateBytes, paragraphs, fieldMeta) {
 
 export function readFieldMeta(zip) {
   const file = zip.file("template/fields.json");
-  if (!file) return new Map();
+  if (!file) return { fieldMeta: new Map(), occStyles: new Map() };
   try {
     const data = JSON.parse(file.asText());
     const map = new Map();
@@ -411,16 +452,26 @@ export function readFieldMeta(zip) {
       map.set(f.name, {
         type: f.type === "image" ? "image" : "text",
         description: f.description || "",
-        defaultFont: f.defaultFont || null,
-        defaultSize: typeof f.defaultSize === "number" ? f.defaultSize : null,
-        defaultSizeLabel: f.defaultSizeLabel || null,
-        defaultColor: f.defaultColor || null,
       });
     }
-    return map;
+    const occStyles = new Map();
+    for (const entry of data.occStyles || []) {
+      if (entry.pIdx == null || entry.occ == null) continue;
+      if (!occStyles.has(entry.pIdx)) occStyles.set(entry.pIdx, []);
+      const arr = occStyles.get(entry.pIdx);
+      arr[entry.occ] = {
+        name: entry.name || null,
+        sigil: entry.sigil || null,
+        font: entry.font || null,
+        size: entry.size ?? null,
+        sizeLabel: entry.sizeLabel || null,
+        color: entry.color || null,
+      };
+    }
+    return { fieldMeta: map, occStyles };
   } catch (e) {
     console.warn("template/fields.json parse failed:", e);
-    return new Map();
+    return { fieldMeta: new Map(), occStyles: new Map() };
   }
 }
 

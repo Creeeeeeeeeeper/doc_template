@@ -328,6 +328,135 @@ body {
   outline-offset: -1px;
   background: #fff;
 }
+.paragraph-editor {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "PingFang SC", "Microsoft YaHei", monospace;
+  background: var(--surface-alt);
+  color: var(--text);
+  min-height: 32px;
+  overflow: auto;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  outline: none;
+}
+.paragraph-editor:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+  background: #fff;
+}
+.placeholder-token {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: default;
+  user-select: all;
+  vertical-align: baseline;
+}
+.placeholder-token.text {
+  background: var(--primary-soft);
+  color: #1e40af;
+  border: 1px solid #93b4f5;
+}
+.placeholder-token.image {
+  background: #fce7f3;
+  color: #9d174d;
+  border: 1px solid #f5a0c8;
+}
+.token-context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+}
+.token-context-menu button {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--danger);
+  font-family: inherit;
+}
+.token-context-menu button:hover {
+  background: #fee2e2;
+}
+
+.occ-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 0 4px;
+}
+.occ-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.occ-nav {
+  display: inline-flex;
+  gap: 4px;
+}
+.field-occ-label {
+  font-size: 11px;
+  color: var(--primary);
+  font-weight: 600;
+  margin-left: 8px;
+  padding: 1px 6px;
+  background: var(--primary-soft);
+  border-radius: 3px;
+}
+.token-tooltip {
+  position: fixed;
+  z-index: 10000;
+  background: #1e293b;
+  color: #f1f5f9;
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  line-height: 1.6;
+  max-width: 280px;
+  white-space: pre-line;
+}
+.token-tooltip .tt-name {
+  font-weight: 700;
+  color: #93c5fd;
+}
+.token-tooltip .tt-type {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+}
+.token-tooltip .tt-type.text {
+  background: #1e40af;
+  color: #93c5fd;
+}
+.token-tooltip .tt-type.image {
+  background: #831843;
+  color: #f9a8d4;
+}
+.token-tooltip .tt-style {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
 .paragraph-actions {
   display: flex;
   gap: 6px;

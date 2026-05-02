@@ -16,23 +16,17 @@
           <button class="tab active" data-mode="edit" type="button">
             <span class="tab-icon">📝</span> 制作模板
           </button>
-          <button class="tab" data-mode="modify" type="button">
-            <span class="tab-icon">🔧</span> 修改模板
-          </button>
           <button class="tab" data-mode="fill" type="button">
             <span class="tab-icon">✏️</span> 填写模板
           </button>
         </div>
       </header>
 
-      <!-- ============ Edit / Modify modes ============ -->
-      <!-- The editor section is shared between "制作模板" (start from any
-           docx, insert placeholders) and "修改模板" (start from an existing
-           template, tweak fields). Only the load/save button labels differ. -->
+      <!-- ============ Edit mode ============ -->
       <section id="mode-edit" class="mode-section">
         <div class="toolbar">
           <button id="btn-edit-load" class="btn btn-primary">
-            选择文档 (.docx)
+            选择文档/模板 (.docx)
           </button>
           <span id="edit-filename" class="filename">未选择</span>
         </div>
