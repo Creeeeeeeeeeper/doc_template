@@ -1,5 +1,7 @@
 # Doc Template
 
+> 本项目 100% 由 AI 完成 · [Xiaomi MiMo](https://github.com/XiaomiMiMo/MiMo) × [Claude](https://claude.ai) × [GPT](https://chatgpt.com)
+
 一个用 Tauri 2 + Vite 写的桌面应用，把"在 Word 里挖空 + 别人填表"这件事拆成三个模式：
 
 1. **制作模板** 📝：导入任意 `.docx`，在原格式预览里点光标 / 选文字，插入 `{@field}`（文字）或 `{%field}`（图片）占位符，保存为模板。占位符在编辑区渲染为高亮块，支持双击编辑、右键删除、Backspace 整块删除。
