@@ -823,6 +823,62 @@ els.btnInsertImage.addEventListener("click", () => insertAtSelection("image"));
 // ============================================================
 // Edit mode — preview rendering
 // ============================================================
+function fixPreviewImages(container) {
+  // docx-preview renders images in several ways depending on the DOCX:
+  // 1. Inline images: <img> inside normal flow — usually OK
+  // 2. Floating/anchored images: <img> inside absolutely positioned <div> —
+  //    these can overlap text or be clipped outside the page.
+  //
+  // Strategy:
+  // - Convert floating image containers to inline-block where possible
+  // - Constrain image size to fit within the page width
+  // - Ensure images have a visible placeholder if src is broken
+
+  const docxEl = container.querySelector(".docx");
+  if (!docxEl) return;
+  const pageWidth = docxEl.offsetWidth || 600;
+
+  // Process all image containers created by docx-preview
+  // docx-preview wraps floating images in a <div> with inline style
+  // containing position:absolute or position:relative
+  const allImgs = container.querySelectorAll("img");
+  for (const img of allImgs) {
+    // Ensure images don't exceed page width
+    img.style.maxWidth = "100%";
+    img.style.height = "auto";
+
+    // Find the closest wrapper div that docx-preview creates for drawings
+    let wrapper = img.closest("div[style]");
+    if (wrapper) {
+      const style = wrapper.getAttribute("style") || "";
+      // If it's a floating/absolute container, try to make it flow better
+      if (/position\s*:\s*absolute/i.test(style)) {
+        // Convert to relative so it participates in normal flow
+        wrapper.style.position = "relative";
+        wrapper.style.display = "inline-block";
+        // Remove offsets that push it off-screen
+        wrapper.style.left = "";
+        wrapper.style.top = "";
+        wrapper.style.right = "";
+        wrapper.style.bottom = "";
+      }
+      // If it has a fixed pixel width that's too large, constrain it
+      const w = parseFloat(wrapper.style.width);
+      if (w > pageWidth) {
+        wrapper.style.width = "100%";
+        wrapper.style.maxWidth = pageWidth + "px";
+      }
+    }
+  }
+
+  // Also handle <svg> elements (docx-preview sometimes renders shapes as SVG)
+  const allSvgs = container.querySelectorAll("svg");
+  for (const svg of allSvgs) {
+    svg.style.maxWidth = "100%";
+    svg.style.height = "auto";
+  }
+}
+
 async function renderPreview(bytes) {
   const container = els.previewContainer;
   container.innerHTML = "";
@@ -852,6 +908,9 @@ async function renderPreview(bytes) {
       "</p>";
     return;
   }
+
+  // Post-process images to fix layout issues
+  fixPreviewImages(container);
 
   // Annotate paragraphs in document order so they map to state.paragraphs[i]
   const ps = container.querySelectorAll("p");

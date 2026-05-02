@@ -242,6 +242,16 @@ body {
   max-width: none;
   transform-origin: top center;
 }
+.preview-container .docx img {
+  max-width: 100%;
+  height: auto;
+  display: inline;
+  vertical-align: baseline;
+}
+.preview-container .docx svg {
+  max-width: 100%;
+  height: auto;
+}
 
 /* docx-preview page cards: center them with page-like spacing */
 .preview-container .docx-wrapper > section.docx {
