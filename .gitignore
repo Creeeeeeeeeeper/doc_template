@@ -39,3 +39,4 @@ smoke-*.docx
 # Claude Code session state
 .claude/
 *-hi.txt
+claude-conversation-*.txt
