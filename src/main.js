@@ -2336,6 +2336,11 @@ function openFilenameDialog(sampleData) {
   const patternInput = document.getElementById("filename-pattern");
   const tagsEl = document.getElementById("filename-field-tags");
   const cancelBtn = document.getElementById("filename-dialog-cancel");
+  const hintEl = document.getElementById("filename-dialog-hint");
+
+  // Clear error hint on input
+  const clearHint = () => { if (hintEl) hintEl.textContent = ""; };
+  patternInput.addEventListener("input", clearHint);
 
   tagsEl.innerHTML = "";
   const nBtn = document.createElement("button");
@@ -2369,6 +2374,7 @@ function openFilenameDialog(sampleData) {
   return new Promise((resolve) => {
     function cleanup() {
       patternInput.removeEventListener("input", onInput);
+      patternInput.removeEventListener("input", clearHint);
       cancelBtn.removeEventListener("click", onCancel);
       dlg.removeEventListener("cancel", onCancel);
       dlg.querySelector("form").removeEventListener("submit", onSubmit);
@@ -2382,9 +2388,22 @@ function openFilenameDialog(sampleData) {
     function onSubmit(e) {
       e.preventDefault();
       const val = patternInput.value.trim();
+      // Validate: check for Windows-forbidden characters
+      const forbidden = val.match(/[\\/:*?"<>|]/g);
+      if (forbidden) {
+        const chars = [...new Set(forbidden)].map((c) => `"${c}"`).join(" ");
+        if (hintEl) hintEl.textContent = `文件名不能包含 ${chars}，请修改`;
+        patternInput.focus();
+        return;
+      }
+      if (!val) {
+        if (hintEl) hintEl.textContent = "文件名模板不能为空";
+        patternInput.focus();
+        return;
+      }
       cleanup();
       dlg.close();
-      resolve(val || "{n}");
+      resolve(val);
     }
     cancelBtn.addEventListener("click", onCancel);
     dlg.addEventListener("cancel", onCancel);
@@ -2422,6 +2441,19 @@ function getImageConfigMap() {
 
 async function batchExportTemplate() {
   if (!state.templateBytes) return;
+
+  // Check for image fields and warn
+  const imageFieldNames = [];
+  for (const [name, meta] of state.fieldMeta) {
+    if (meta.type === "image") imageFieldNames.push(name);
+  }
+  if (imageFieldNames.length > 0) {
+    const ok = confirm(
+      `模板中包含图片字段（${imageFieldNames.join("、")}），Excel 无法批量填写图片。\n` +
+      `图片字段需要在「填写模板」中手动设置。\n\n是否继续导出？`
+    );
+    if (!ok) return;
+  }
 
   // Select output folder
   const folder = await open({ directory: true, title: "选择导出文件夹" });
