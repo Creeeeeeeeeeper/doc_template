@@ -33,7 +33,7 @@ body {
 }
 
 .app {
-  max-width: 1280px;
+  /* max-width: 1280px; */
   margin: 0 auto;
   padding: 16px 22px 80px;
 }
@@ -220,7 +220,7 @@ body {
 .preview-container {
   flex: 1;
   overflow: auto;
-  padding: 16px;
+  padding: 18px;
   background: #eceff3;
 }
 .preview-container > .empty-state {
@@ -228,13 +228,25 @@ body {
 }
 .preview-container .docx-wrapper {
   background: transparent;
-  padding: 0;
+  padding: 6px 0 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
 }
 .preview-container .docx {
   background: #fff;
   margin: 0 auto;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-  max-width: 100%;
+  width: auto;
+  max-width: none;
+  transform-origin: top center;
+}
+
+/* docx-preview page cards: center them with page-like spacing */
+.preview-container .docx-wrapper > section.docx {
+  margin: 0 auto 14px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 .preview-paragraph {
   cursor: pointer;
@@ -308,6 +320,7 @@ body {
   color: var(--text);
   resize: vertical;
   min-height: 32px;
+  overflow: auto;
   line-height: 1.55;
 }
 .paragraph-textarea:focus {
@@ -770,6 +783,28 @@ body {
   justify-content: flex-end;
   align-items: center;
   gap: 16px;
+}
+
+.preview-zoom-controls {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.preview-zoom-controls .btn {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+.zoom-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.zoom-value {
+  font-size: 12px;
+  min-width: 48px;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 .status {
   font-size: 13px;

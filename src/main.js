@@ -208,6 +208,11 @@ const els = {
   paragraphList: document.getElementById("paragraph-list"),
   fieldSummaryInline: document.getElementById("field-summary-inline"),
   btnEditSave: document.getElementById("btn-edit-save"),
+  previewZoomControls: document.getElementById("preview-zoom-controls"),
+  btnZoomOut: document.getElementById("btn-zoom-out"),
+  btnZoomReset: document.getElementById("btn-zoom-reset"),
+  btnZoomIn: document.getElementById("btn-zoom-in"),
+  zoomValue: document.getElementById("zoom-value"),
 
   btnFillLoad: document.getElementById("btn-fill-load"),
   fillFilename: document.getElementById("fill-filename"),
@@ -216,6 +221,71 @@ const els = {
 
   status: document.getElementById("status"),
 };
+
+const PREVIEW_ZOOM_MIN = 0.5;
+const PREVIEW_ZOOM_MAX = 2.5;
+const PREVIEW_ZOOM_STEP = 0.1;
+let previewScale = 1;
+let previewFitWidth = true;
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function getPreviewDocxElements() {
+  return [...els.previewContainer.querySelectorAll(".docx")];
+}
+
+function getPreviewWrapperElement() {
+  return els.previewContainer.querySelector(".docx-wrapper");
+}
+
+function updateZoomUI() {
+  if (!els.zoomValue) return;
+  if (previewFitWidth) {
+    els.zoomValue.textContent = "适应";
+  } else {
+    els.zoomValue.textContent = `${Math.round(previewScale * 100)}%`;
+  }
+}
+
+function computeFitScale() {
+  const docs = getPreviewDocxElements();
+  const docx = docs[0];
+  if (!docx) return 1;
+  const containerWidth = els.previewContainer.clientWidth - 36;
+  const naturalWidth = docx.offsetWidth || 1;
+  if (containerWidth <= 0 || naturalWidth <= 0) return 1;
+  return clamp(containerWidth / naturalWidth, PREVIEW_ZOOM_MIN, PREVIEW_ZOOM_MAX);
+}
+
+function applyPreviewZoom() {
+  const docs = getPreviewDocxElements();
+  if (docs.length === 0) return;
+  const wrapper = getPreviewWrapperElement();
+  const scale = previewFitWidth ? computeFitScale() : previewScale;
+  // Use CSS zoom instead of transform: zoom affects layout width/height,
+  // so fit-width won't leave phantom horizontal scrollbars.
+  if (wrapper) {
+    wrapper.style.zoom = String(scale);
+  }
+  for (const docx of docs) {
+    docx.style.transform = "none";
+    docx.style.marginBottom = "14px";
+  }
+  updateZoomUI();
+}
+
+function setPreviewScale(scale) {
+  previewFitWidth = false;
+  previewScale = clamp(scale, PREVIEW_ZOOM_MIN, PREVIEW_ZOOM_MAX);
+  applyPreviewZoom();
+}
+
+function setPreviewFitWidth() {
+  previewFitWidth = true;
+  applyPreviewZoom();
+}
 
 // ============================================================
 // Utility
@@ -284,6 +354,9 @@ function switchMode(mode) {
   els.modeFill.classList.toggle("hidden", mode !== "fill");
   els.btnEditSave.classList.toggle("hidden", !isEditor);
   els.btnFillExport.classList.toggle("hidden", mode !== "fill");
+  if (els.previewZoomControls) {
+    els.previewZoomControls.classList.toggle("hidden", !isEditor);
+  }
 
   if (isEditor) {
     const labels = EDITOR_LABELS[mode];
@@ -498,15 +571,17 @@ async function renderPreview(bytes) {
   try {
     await renderAsync(blob, container, undefined, {
       inWrapper: true,
-      breakPages: false,
+      breakPages: true,
       ignoreLastRenderedPageBreak: true,
       renderHeaders: false,
       renderFooters: false,
       renderFootnotes: false,
       renderEndnotes: false,
       experimental: false,
-      ignoreWidth: true,
-      ignoreHeight: true,
+      // Keep the document's own page size/margins so preview matches Word
+      // (A4/Letter proportions and layout are driven by DOCX section settings).
+      ignoreWidth: false,
+      ignoreHeight: false,
     });
   } catch (e) {
     console.error("renderAsync failed", e);
@@ -534,12 +609,25 @@ async function renderPreview(bytes) {
         " will be linked.",
     );
   }
+
+  // First render uses fit-width so users see complete page without horizontal scroll.
+  if (previewFitWidth) {
+    setPreviewFitWidth();
+  } else {
+    applyPreviewZoom();
+  }
 }
 
 function clearActivePreview() {
   els.previewContainer
     .querySelectorAll(".preview-paragraph.active")
     .forEach((p) => p.classList.remove("active"));
+}
+
+function autoResizeTextarea(textarea) {
+  if (!textarea) return;
+  textarea.style.height = "auto";
+  textarea.style.height = `${textarea.scrollHeight}px`;
 }
 
 function highlightPreview(idx) {
@@ -1120,7 +1208,6 @@ function renderParagraphList() {
 
     const ta = document.createElement("textarea");
     ta.className = "paragraph-textarea";
-    ta.rows = Math.max(1, p.currentText.split("\n").length);
     ta.value = p.currentText;
     ta.placeholder = "(空段落)";
 
@@ -1132,7 +1219,7 @@ function renderParagraphList() {
         "has-placeholder",
         /\{[@%]\w+\}/.test(p.currentText),
       );
-      ta.rows = Math.max(1, ta.value.split("\n").length);
+      autoResizeTextarea(ta);
       syncFieldMetaFromText();
       updateFieldSummary();
     });
@@ -1140,6 +1227,8 @@ function renderParagraphList() {
     ta.addEventListener("focus", () => highlightPreview(p.index));
 
     body.appendChild(ta);
+    // Measure after mounted; detached textarea may report incorrect scrollHeight.
+    requestAnimationFrame(() => autoResizeTextarea(ta));
 
     const actions = document.createElement("div");
     actions.className = "paragraph-actions";
@@ -1214,7 +1303,7 @@ function renderParagraphList() {
         "has-placeholder",
         /\{[@%]\w+\}/.test(p.currentText),
       );
-      ta.rows = Math.max(1, p.currentText.split("\n").length);
+      autoResizeTextarea(ta);
       updateFieldSummary();
     });
 
@@ -1325,6 +1414,34 @@ async function refreshPreview() {
 els.btnEditLoad.addEventListener("click", editLoad);
 els.btnEditSave.addEventListener("click", editSave);
 els.btnRefreshPreview.addEventListener("click", refreshPreview);
+
+els.btnZoomOut?.addEventListener("click", () => {
+  const base = previewFitWidth ? computeFitScale() : previewScale;
+  setPreviewScale(base - PREVIEW_ZOOM_STEP);
+});
+els.btnZoomIn?.addEventListener("click", () => {
+  const base = previewFitWidth ? computeFitScale() : previewScale;
+  setPreviewScale(base + PREVIEW_ZOOM_STEP);
+});
+els.btnZoomReset?.addEventListener("click", () => {
+  setPreviewFitWidth();
+});
+
+els.previewContainer.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const base = previewFitWidth ? computeFitScale() : previewScale;
+    const delta = e.deltaY < 0 ? PREVIEW_ZOOM_STEP : -PREVIEW_ZOOM_STEP;
+    setPreviewScale(base + delta);
+  },
+  { passive: false },
+);
+
+window.addEventListener("resize", () => {
+  if (previewFitWidth) applyPreviewZoom();
+});
 
 // ============================================================
 // Fill mode
