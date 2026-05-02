@@ -893,31 +893,60 @@ function removeImagePlaceholderAnnotations() {
 
 function annotateImagePlaceholders() {
   removeImagePlaceholderAnnotations();
-  const ps = els.previewContainer.querySelectorAll(".preview-paragraph");
-  for (const p of ps) {
-    const text = p.textContent || "";
-    if (!text.includes("{%")) continue;
-    const re = /\{%(\w+)\}/g;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      const placeholder = m[0];
-      const fieldName = m[1];
-      // Walk text nodes to find the exact range
-      const range = findTextRangeInElement(p, placeholder);
-      if (!range) continue;
-      const rect = range.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) continue;
-      const containerRect = els.previewContainer.getBoundingClientRect();
-      const overlay = document.createElement("div");
-      overlay.className = "image-placeholder-rect";
-      overlay.innerHTML = `<span class="image-placeholder-label">{%${fieldName}}</span>`;
-      overlay.style.left = `${rect.left - containerRect.left + els.previewContainer.scrollLeft}px`;
-      overlay.style.top = `${rect.top - containerRect.top + els.previewContainer.scrollTop}px`;
-      overlay.style.width = `${rect.width}px`;
-      overlay.style.height = `${rect.height}px`;
-      els.previewContainer.appendChild(overlay);
+  requestAnimationFrame(() => {
+    // Search the entire preview container for {%name} patterns
+    const container = els.previewContainer;
+    const allText = container.textContent || "";
+    const fieldNames = new Set();
+    for (const m of allText.matchAll(/\{%(\w+)\}/g)) {
+      fieldNames.add(m[1]);
     }
-  }
+    if (fieldNames.size === 0) return;
+
+    // Walk all text nodes in the container and find matching ranges
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let nd;
+    while ((nd = walker.nextNode())) {
+      if (nd.textContent) textNodes.push(nd);
+    }
+    // Concatenate to build a map of char offset -> node
+    let fullText = "";
+    const charMap = []; // charMap[i] = { node, offsetInNode }
+    for (const n of textNodes) {
+      const t = n.textContent || "";
+      for (let i = 0; i < t.length; i++) {
+        charMap.push({ node: n, offsetInNode: i });
+      }
+      fullText += t;
+    }
+
+    for (const fieldName of fieldNames) {
+      const search = `{%${fieldName}}`;
+      let idx = fullText.indexOf(search);
+      while (idx >= 0) {
+        const endIdx = idx + search.length;
+        if (idx < charMap.length && endIdx <= charMap.length) {
+          const range = document.createRange();
+          range.setStart(charMap[idx].node, charMap[idx].offsetInNode);
+          range.setEnd(charMap[endIdx - 1].node, charMap[endIdx - 1].offsetInNode + 1);
+          const rect = range.getBoundingClientRect();
+          if (rect.width > 0 || rect.height > 0) {
+            const containerRect = container.getBoundingClientRect();
+            const overlay = document.createElement("div");
+            overlay.className = "image-placeholder-rect";
+            overlay.innerHTML = `<span class="image-placeholder-label">{%${fieldName}}</span>`;
+            overlay.style.left = `${rect.left - containerRect.left + container.scrollLeft}px`;
+            overlay.style.top = `${rect.top - containerRect.top + container.scrollTop}px`;
+            overlay.style.width = `${rect.width}px`;
+            overlay.style.height = `${rect.height}px`;
+            container.appendChild(overlay);
+          }
+        }
+        idx = fullText.indexOf(search, endIdx);
+      }
+    }
+  });
 }
 
 function findTextRangeInElement(root, searchText) {
@@ -925,7 +954,7 @@ function findTextRangeInElement(root, searchText) {
   const textNodes = [];
   let node;
   while ((node = walker.nextNode())) {
-    textNodes.push(node);
+    if (node.textContent) textNodes.push(node);
   }
   // Concatenate all text content and find the search string
   let fullText = "";
