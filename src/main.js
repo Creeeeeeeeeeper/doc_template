@@ -2442,6 +2442,9 @@ function getImageConfigMap() {
 async function batchExportTemplate() {
   if (!state.templateBytes) return;
 
+  // Sync fieldMeta from paragraph text first
+  syncFieldMetaFromText();
+
   // Check for image fields and warn
   const imageFieldNames = [];
   for (const [name, meta] of state.fieldMeta) {
