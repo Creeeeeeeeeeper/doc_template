@@ -232,7 +232,7 @@ const els = {
   fillFilename: document.getElementById("fill-filename"),
   formSection: document.getElementById("form-section"),
   btnFillExport: document.getElementById("btn-fill-export"),
-  btnBatchExport: document.getElementById("btn-batch-export"),
+  btnBatchExportTemplate: document.getElementById("btn-batch-export-template"),
   btnBatchImport: document.getElementById("btn-batch-import"),
 
   status: document.getElementById("status"),
@@ -620,8 +620,8 @@ function switchMode(mode) {
   els.modeEdit.classList.toggle("hidden", !isEditor);
   els.modeFill.classList.toggle("hidden", mode !== "fill");
   els.btnEditSave.classList.toggle("hidden", !isEditor);
+  els.btnBatchExportTemplate.classList.toggle("hidden", !isEditor);
   els.btnFillExport.classList.toggle("hidden", mode !== "fill");
-  els.btnBatchExport.classList.toggle("hidden", mode !== "fill");
   els.btnBatchImport.classList.toggle("hidden", mode !== "fill");
   if (els.previewZoomControls) {
     els.previewZoomControls.classList.toggle("hidden", !isEditor);
@@ -1835,6 +1835,7 @@ async function editLoad() {
     clearPreviewSelection();
     els.btnEditSave.disabled = false;
     els.btnRefreshPreview.disabled = false;
+    updateBatchExportButton();
 
     await renderPreview(bytes);
     setStatus(`已加载，共 ${state.paragraphs.length} 段`);
@@ -1951,7 +1952,6 @@ async function fillLoad() {
     els.fillFilename.textContent = state.filename;
     setStatus(`已加载模板，发现 ${state.fields.length} 个字段`);
     await renderForm();
-    els.btnBatchExport.disabled = false;
     els.btnBatchImport.disabled = false;
   } catch (e) {
     console.error(e);
@@ -2290,18 +2290,14 @@ els.btnFillLoad.addEventListener("click", fillLoad);
 els.btnFillExport.addEventListener("click", fillExport);
 
 // ============================================================
-// Batch export / import
+// Batch: export template + Excel (edit mode)
 // ============================================================
-function renderFilenamePreview(sampleData) {
-  const el = document.getElementById("filename-preview");
-  const pattern = document.getElementById("filename-pattern").value || "{n}";
-  const lines = [];
-  for (let i = 0; i < 3; i++) {
-    const row = sampleData[i] || {};
-    lines.push(formatFilename(pattern, row, i + 1) + ".docx");
+function buildSampleDataForPreview() {
+  const data = [{}];
+  for (const f of state.fields) {
+    if (f.type === "text") data[0][f.name] = "";
   }
-  if (sampleData.length > 3) lines.push(`… (共 ${sampleData.length} 个文件)`);
-  el.innerHTML = lines.map((l) => `<div class="preview-item">${escapeHtml(l)}</div>`).join("");
+  return data;
 }
 
 function formatFilename(pattern, row, n) {
@@ -2309,12 +2305,30 @@ function formatFilename(pattern, row, n) {
   out = out.replace(/\{(\w+)\}/g, (full, name) => {
     const val = row[name];
     if (val == null || val === "") return "";
-    // Sanitize filename chars
     return String(val).replace(/[\\/:*?"<>|]/g, "_").substring(0, 50);
   });
-  // Clean up consecutive underscores/spaces
   out = out.replace(/[_\s]+/g, "_").replace(/^_|_$/g, "");
   return out || `file_${n}`;
+}
+
+function renderFilenamePreview(sampleData) {
+  const el = document.getElementById("filename-preview");
+  const pattern = document.getElementById("filename-pattern").value || "{n}";
+  const lines = [];
+  for (let i = 0; i < Math.min(3, sampleData.length); i++) {
+    lines.push(formatFilename(pattern, sampleData[i], i + 1) + ".docx");
+  }
+  if (sampleData.length > 3) lines.push(`… (共 ${sampleData.length} 个文件)`);
+  el.innerHTML = lines.map((l) => `<div class="preview-item">${escapeHtml(l)}</div>`).join("");
+}
+
+function insertAtCursorSimple(input, text) {
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const old = input.value;
+  input.value = old.slice(0, start) + text + old.slice(end);
+  input.selectionStart = input.selectionEnd = start + text.length;
+  input.focus();
 }
 
 function openFilenameDialog(sampleData) {
@@ -2323,21 +2337,18 @@ function openFilenameDialog(sampleData) {
   const tagsEl = document.getElementById("filename-field-tags");
   const cancelBtn = document.getElementById("filename-dialog-cancel");
 
-  // Populate field tags
   tagsEl.innerHTML = "";
-  tagsEl.appendChild((() => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "filename-field-tag";
-    b.textContent = "{n} 自动编号";
-    b.addEventListener("click", () => {
-      insertAtCursorSimple(patternInput, "{n}");
-      renderFilenamePreview(sampleData);
-    });
-    return b;
-  })());
+  const nBtn = document.createElement("button");
+  nBtn.type = "button";
+  nBtn.className = "filename-field-tag";
+  nBtn.textContent = "{n} 自动编号";
+  nBtn.addEventListener("click", () => {
+    insertAtCursorSimple(patternInput, "{n}");
+    renderFilenamePreview(sampleData);
+  });
+  tagsEl.appendChild(nBtn);
   for (const f of state.fields) {
-    if (f.type === "image") continue; // skip image fields for filename
+    if (f.type === "image") continue;
     const b = document.createElement("button");
     b.type = "button";
     b.className = "filename-field-tag";
@@ -2383,15 +2394,6 @@ function openFilenameDialog(sampleData) {
   });
 }
 
-function insertAtCursorSimple(input, text) {
-  const start = input.selectionStart;
-  const end = input.selectionEnd;
-  const old = input.value;
-  input.value = old.slice(0, start) + text + old.slice(end);
-  input.selectionStart = input.selectionEnd = start + text.length;
-  input.focus();
-}
-
 function getOccStyleMap() {
   const occStyleMap = new Map();
   for (const [, styles] of state.occurrenceStyles) {
@@ -2418,87 +2420,82 @@ function getImageConfigMap() {
   return imageConfigMap;
 }
 
-async function batchExport() {
+async function batchExportTemplate() {
   if (!state.templateBytes) return;
 
-  // Build sample data for preview (use current form values as first row)
-  const sampleData = [{}];
-  for (const f of state.fields) {
-    if (f.type === "text") {
-      sampleData[0][f.name] = state.values[f.name]?.text || "";
-    }
-  }
-
-  const pattern = await openFilenameDialog(sampleData);
-  if (!pattern) return;
-
   // Select output folder
-  const folder = await open({ directory: true, title: "选择批量导出文件夹" });
+  const folder = await open({ directory: true, title: "选择导出文件夹" });
   if (!folder) {
     setStatus("已取消");
     return;
   }
   const folderPath = typeof folder === "string" ? folder : folder.path;
 
-  setStatus("批量导出中…");
+  setStatus("导出中…");
   try {
-    // 1. Export the blank Excel template
-    const excelRows = [];
-    // Header row: field names (text fields only for data, image fields noted)
+    // 1. Save the Word template (same as editSave but to chosen folder)
+    syncFieldMetaFromText();
+    const templateBytes = buildTemplate(
+      state.templateBytes,
+      state.paragraphs,
+      state.fieldMeta,
+      state.occurrenceStyles,
+    );
+    const templateName = state.isTemplateInput
+      ? state.filename
+      : state.filename.replace(/\.docx$/i, "") + "-template.docx";
+    await invoke("save_bytes", {
+      path: `${folderPath}/${templateName}`,
+      bytes: Array.from(templateBytes),
+    });
+
+    // 2. Build Excel template
     const textFields = state.fields.filter((f) => f.type === "text");
     const imageFields = state.fields.filter((f) => f.type === "image");
     const headers = textFields.map((f) => f.name);
-    excelRows.push(headers);
-
-    // Pre-fill current values as first example row
-    const firstRow = textFields.map((f) => state.values[f.name]?.text || "");
-    excelRows.push(firstRow);
-    // Add 9 empty rows for the user to fill
-    for (let i = 0; i < 9; i++) {
-      excelRows.push(headers.map(() => ""));
+    const rows = [headers];
+    // 10 empty rows for the user to fill
+    for (let i = 0; i < 10; i++) {
+      rows.push(headers.map(() => ""));
     }
-
-    const ws = XLSX.utils.aoa_to_sheet(excelRows);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "填写数据");
-
-    // Add a note about image fields
     if (imageFields.length > 0) {
       const noteRows = [
-        ["注意：以下图片字段需要手动处理（Excel 无法嵌入图片数据）："],
+        ["以下图片字段需要单独收集，Excel 无法嵌入图片："],
         ...imageFields.map((f) => [`  - ${f.name}: ${f.description || ""}`]),
       ];
-      const noteWs = XLSX.utils.aoa_to_sheet(noteRows);
-      XLSX.utils.book_append_sheet(wb, noteWs, "图片字段说明");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(noteRows), "图片字段说明");
     }
-
     const excelBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const excelName = state.filename.replace(/\.docx$/i, "") + "_批量填写模板.xlsx";
-    const excelPath = `${folderPath}/${excelName}`;
-    await invoke("save_bytes", { path: excelPath, bytes: Array.from(new Uint8Array(excelBuf)) });
+    const excelName = state.filename.replace(/\.docx$/i, "") + "_批量填写表.xlsx";
+    await invoke("save_bytes", {
+      path: `${folderPath}/${excelName}`,
+      bytes: Array.from(new Uint8Array(excelBuf)),
+    });
 
-    // 2. Also export a blank filled Word as reference
-    const occStyleMap = getOccStyleMap();
-    const imageConfigMap = getImageConfigMap();
-    const emptyValues = {};
-    for (const f of state.fields) {
-      if (f.type === "text") emptyValues[f.name] = { text: "" };
-    }
-    const blankWord = renderFilled(state.templateBytes, state.fields, emptyValues, occStyleMap, imageConfigMap);
-    const blankName = state.filename.replace(/\.docx$/i, "") + "_空白模板.docx";
-    await invoke("save_bytes", { path: `${folderPath}/${blankName}`, bytes: Array.from(blankWord) });
-
-    setStatus(`已导出到 ${folderPath}：${excelName} + ${blankName}`, "success");
+    setStatus(`已导出：${templateName} + ${excelName} → ${folderPath}`, "success");
   } catch (e) {
     console.error(e);
-    setStatus("批量导出失败：" + (e?.message || e), "error");
+    setStatus("导出失败：" + (e?.message || e), "error");
   }
 }
 
+// Enable batch export button when template is loaded in edit mode
+function updateBatchExportButton() {
+  if (els.btnBatchExportTemplate) {
+    els.btnBatchExportTemplate.disabled = !state.templateBytes || state.paragraphs.length === 0;
+  }
+}
+
+// ============================================================
+// Batch: import Excel + generate Word files (fill mode)
+// ============================================================
 async function batchImport() {
   if (!state.templateBytes) return;
 
-  // 1. Pick the Excel file
+  // 1. Pick Excel file
   const excelPath = await open({
     multiple: false,
     title: "选择填写好的 Excel 文件",
@@ -2538,7 +2535,7 @@ async function batchImport() {
   if (!pattern) return;
 
   // 4. Select output folder
-  const folder = await open({ directory: true, title: "选择批量导出文件夹" });
+  const folder = await open({ directory: true, title: "选择输出文件夹" });
   if (!folder) {
     setStatus("已取消");
     return;
@@ -2559,14 +2556,12 @@ async function batchImport() {
         if (f.type === "text") {
           values[f.name] = { text: rows[i][f.name] || "" };
         } else {
-          // Image fields: try to get from current form values (user must set manually)
           values[f.name] = { bytes: state.values[f.name]?.bytes };
         }
       }
       const out = renderFilled(state.templateBytes, state.fields, values, occStyleMap, imageConfigMap);
       const fileName = formatFilename(pattern, rows[i], i + 1) + ".docx";
-      const filePath = `${folderPath}/${fileName}`;
-      await invoke("save_bytes", { path: filePath, bytes: Array.from(out) });
+      await invoke("save_bytes", { path: `${folderPath}/${fileName}`, bytes: Array.from(out) });
       success++;
     } catch (e) {
       console.error(`Row ${i + 1} failed:`, e);
@@ -2577,7 +2572,7 @@ async function batchImport() {
   setStatus(`批量生成完成：成功 ${success} 个${fail > 0 ? `，失败 ${fail} 个` : ""}。输出：${folderPath}`, success > 0 ? "success" : "error");
 }
 
-els.btnBatchExport.addEventListener("click", batchExport);
+els.btnBatchExportTemplate.addEventListener("click", batchExportTemplate);
 els.btnBatchImport.addEventListener("click", batchImport);
 
 // Initial state
