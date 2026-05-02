@@ -313,53 +313,58 @@ export function renderFilled(templateBytes, fields, values, occStyleMap, imageCo
 
   const imageModule = new ImageModule({
     centered: false,
-    getImage: (_tagValue, tagName) => {
-      const bytes = imageMap.get(tagName);
+    getImage: (_tagValue, partValue) => {
+      const bytes = imageMap.get(partValue);
       if (!bytes) return bytes;
       // Pre-read natural dimensions from the image bytes
-      if (!imageDimCache.has(tagName)) {
-        imageDimCache.set(tagName, getImageDimensions(bytes));
+      if (!imageDimCache.has(partValue)) {
+        imageDimCache.set(partValue, getImageDimensions(bytes));
       }
       return bytes;
     },
-    getSize: (tagValue, _imageData) => {
-      const config = (imageConfigMap && imageConfigMap.get(tagValue)) || {};
+    getSize: (_imgBuffer, _tagValue, partValue) => {
+      const config = normalizeImageConfig((imageConfigMap && imageConfigMap.get(partValue)) || {});
       const {
         fitMode = "width",
         maintainRatio = true,
-        maxWidth = 300,
-        maxHeight = 400,
-        minWidth = 50,
-        minHeight = 50,
+        maxWidth = DEFAULT_IMAGE_CONFIG.maxWidth,
+        maxHeight = DEFAULT_IMAGE_CONFIG.maxHeight,
+        minWidth = DEFAULT_IMAGE_CONFIG.minWidth,
+        minHeight = DEFAULT_IMAGE_CONFIG.minHeight,
       } = config;
 
-      const dims = imageDimCache.get(tagValue);
+      const maxWidthPx = maxWidth * PX_PER_CM;
+      const maxHeightPx = maxHeight * PX_PER_CM;
+      const minWidthPx = minWidth * PX_PER_CM;
+      const minHeightPx = minHeight * PX_PER_CM;
+
+      const dims = imageDimCache.get(partValue);
       const natW = dims?.naturalW || 0;
       const natH = dims?.naturalH || 0;
       const ratio = natW > 0 && natH > 0 ? natW / natH : 1;
 
       let w, h;
       if (fitMode === "height") {
-        h = maxHeight;
-        w = maintainRatio ? Math.round(h * ratio) : maxWidth;
+        h = maxHeightPx;
+        w = maintainRatio ? Math.round(h * ratio) : maxWidthPx;
       } else if (fitMode === "contain") {
         // Fit inside maxWidth × maxHeight box
-        const boxRatio = maxWidth / maxHeight;
+        const boxRatio = maxWidthPx / maxHeightPx;
         if (ratio > boxRatio) {
-          w = maxWidth;
-          h = maintainRatio ? Math.round(w / ratio) : maxHeight;
+          w = maxWidthPx;
+          h = maintainRatio ? Math.round(w / ratio) : maxHeightPx;
         } else {
-          h = maxHeight;
-          w = maintainRatio ? Math.round(h * ratio) : maxWidth;
+          h = maxHeightPx;
+          w = maintainRatio ? Math.round(h * ratio) : maxWidthPx;
         }
       } else {
         // "width" (default)
-        w = maxWidth;
-        h = maintainRatio ? Math.round(w / ratio) : maxHeight;
+        w = maxWidthPx;
+        h = maintainRatio ? Math.round(w / ratio) : maxHeightPx;
       }
 
-      w = Math.max(minWidth, Math.min(maxWidth, w));
-      h = Math.max(minHeight, Math.min(maxHeight, h));
+      w = Math.max(minWidthPx, Math.min(maxWidthPx, w));
+      h = Math.max(minHeightPx, Math.min(maxHeightPx, h));
       return [w, h];
     },
   });
@@ -535,11 +540,34 @@ export function buildTemplate(templateBytes, paragraphs, fieldMeta, occurrenceSt
 const DEFAULT_IMAGE_CONFIG = {
   fitMode: "width",
   maintainRatio: true,
-  maxWidth: 300,
-  maxHeight: 400,
-  minWidth: 50,
-  minHeight: 50,
+  maxWidth: 8.0,
+  maxHeight: 10.58,
+  minWidth: 1.32,
+  minHeight: 1.32,
 };
+
+const PX_PER_CM = 96 / 2.54;
+
+function roundCm(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function normalizeImageConfig(config = {}) {
+  const hasLegacyPx =
+    Number(config.maxWidth) > 50 ||
+    Number(config.maxHeight) > 50 ||
+    Number(config.minWidth) > 50 ||
+    Number(config.minHeight) > 50;
+  const scale = hasLegacyPx ? 1 / PX_PER_CM : 1;
+  return {
+    fitMode: config.fitMode || DEFAULT_IMAGE_CONFIG.fitMode,
+    maintainRatio: config.maintainRatio !== false,
+    maxWidth: roundCm((Number(config.maxWidth) || DEFAULT_IMAGE_CONFIG.maxWidth) * scale),
+    maxHeight: roundCm((Number(config.maxHeight) || DEFAULT_IMAGE_CONFIG.maxHeight) * scale),
+    minWidth: roundCm((Number(config.minWidth) || DEFAULT_IMAGE_CONFIG.minWidth) * scale),
+    minHeight: roundCm((Number(config.minHeight) || DEFAULT_IMAGE_CONFIG.minHeight) * scale),
+  };
+}
 
 export function readFieldMeta(zip) {
   const file = zip.file("template/fields.json");
@@ -554,15 +582,7 @@ export function readFieldMeta(zip) {
         description: f.description || "",
       };
       if (entry.type === "image") {
-        const ic = f.imageConfig || {};
-        entry.imageConfig = {
-          fitMode: ic.fitMode || DEFAULT_IMAGE_CONFIG.fitMode,
-          maintainRatio: ic.maintainRatio !== false,
-          maxWidth: Number(ic.maxWidth) || DEFAULT_IMAGE_CONFIG.maxWidth,
-          maxHeight: Number(ic.maxHeight) || DEFAULT_IMAGE_CONFIG.maxHeight,
-          minWidth: Number(ic.minWidth) || DEFAULT_IMAGE_CONFIG.minWidth,
-          minHeight: Number(ic.minHeight) || DEFAULT_IMAGE_CONFIG.minHeight,
-        };
+        entry.imageConfig = normalizeImageConfig(f.imageConfig || {});
       }
       map.set(f.name, entry);
     }

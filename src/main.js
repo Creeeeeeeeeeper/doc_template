@@ -47,6 +47,25 @@ const state = {
   occurrenceStyles: new Map(),
 };
 
+const DEFAULT_IMAGE_CONFIG = {
+  fitMode: "width",
+  maintainRatio: true,
+  maxWidth: 8.0,
+  maxHeight: 10.58,
+  minWidth: 1.32,
+  minHeight: 1.32,
+};
+
+function roundCm(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function formatCm(value, fallback) {
+  const n = Number(value);
+  const v = Number.isFinite(n) && n > 0 ? n : fallback;
+  return roundCm(v).toFixed(2);
+}
+
 const FALLBACK_FONTS = [
   // Common Windows / Office Chinese fonts
   "宋体",
@@ -1336,12 +1355,12 @@ async function openFieldDialog(defaults = {}) {
 
     // Image config defaults
     const ic = imageConfig || {};
-    fieldDialogEls.fitMode.value = ic.fitMode || "width";
+    fieldDialogEls.fitMode.value = ic.fitMode || DEFAULT_IMAGE_CONFIG.fitMode;
     fieldDialogEls.maintainRatio.checked = ic.maintainRatio !== false;
-    fieldDialogEls.maxW.value = ic.maxWidth ?? 300;
-    fieldDialogEls.maxH.value = ic.maxHeight ?? 400;
-    fieldDialogEls.minW.value = ic.minWidth ?? 50;
-    fieldDialogEls.minH.value = ic.minHeight ?? 50;
+    fieldDialogEls.maxW.value = formatCm(ic.maxWidth, DEFAULT_IMAGE_CONFIG.maxWidth);
+    fieldDialogEls.maxH.value = formatCm(ic.maxHeight, DEFAULT_IMAGE_CONFIG.maxHeight);
+    fieldDialogEls.minW.value = formatCm(ic.minWidth, DEFAULT_IMAGE_CONFIG.minWidth);
+    fieldDialogEls.minH.value = formatCm(ic.minHeight, DEFAULT_IMAGE_CONFIG.minHeight);
     fieldDialogEls.imageConfig.classList.toggle("hidden", type !== "image" || hideImageConfig);
 
     let descTouched = !!description;
@@ -1442,10 +1461,10 @@ async function openFieldDialog(defaults = {}) {
         result.imageConfig = {
           fitMode: fieldDialogEls.fitMode.value,
           maintainRatio: fieldDialogEls.maintainRatio.checked,
-          maxWidth: Number(fieldDialogEls.maxW.value) || 300,
-          maxHeight: Number(fieldDialogEls.maxH.value) || 400,
-          minWidth: Number(fieldDialogEls.minW.value) || 50,
-          minHeight: Number(fieldDialogEls.minH.value) || 50,
+          maxWidth: roundCm(Number(fieldDialogEls.maxW.value) || DEFAULT_IMAGE_CONFIG.maxWidth),
+          maxHeight: roundCm(Number(fieldDialogEls.maxH.value) || DEFAULT_IMAGE_CONFIG.maxHeight),
+          minWidth: roundCm(Number(fieldDialogEls.minW.value) || DEFAULT_IMAGE_CONFIG.minWidth),
+          minHeight: roundCm(Number(fieldDialogEls.minH.value) || DEFAULT_IMAGE_CONFIG.minHeight),
         };
       }
       cleanup();
@@ -2054,12 +2073,7 @@ function ensureImageConfig(name) {
   if (!meta) return null;
   if (!meta.imageConfig) {
     meta.imageConfig = {
-      fitMode: "width",
-      maintainRatio: true,
-      maxWidth: 300,
-      maxHeight: 400,
-      minWidth: 50,
-      minHeight: 50,
+      ...DEFAULT_IMAGE_CONFIG,
     };
   }
   return meta.imageConfig;
@@ -2139,7 +2153,7 @@ async function renderForm() {
       }
     } else {
       const card = createFillFieldCard(field.name, field.type, meta?.description, null);
-      const v = state.values[field.name] || { bytes: null, mime: "", filename: "" };
+      const v = state.values[field.name] || { bytes: null, mime: "", filename: "", previewUrl: "" };
       state.values[field.name] = v;
 
       const row = document.createElement("div");
@@ -2150,16 +2164,43 @@ async function renderForm() {
       const preview = document.createElement("span");
       preview.className = "image-preview-name";
       preview.textContent = v.filename || "尚未选择图片";
+      const imagePreview = document.createElement("div");
+      imagePreview.className = "image-preview-box";
+      const imagePreviewImg = document.createElement("img");
+      imagePreviewImg.className = "image-preview-thumb";
+      imagePreviewImg.alt = `${field.name} 预览`;
+      const imagePreviewEmpty = document.createElement("div");
+      imagePreviewEmpty.className = "image-preview-empty";
+      imagePreviewEmpty.textContent = "未选择图片";
+
+      function renderImagePreview() {
+        const hasPreview = !!v.previewUrl;
+        imagePreview.innerHTML = "";
+        if (hasPreview) {
+          imagePreviewImg.src = v.previewUrl;
+          imagePreview.appendChild(imagePreviewImg);
+        } else {
+          imagePreview.appendChild(imagePreviewEmpty);
+        }
+      }
+
       fileInp.addEventListener("change", async () => {
         const f = fileInp.files?.[0];
         if (!f) return;
+        if (v.previewUrl) {
+          URL.revokeObjectURL(v.previewUrl);
+        }
         v.bytes = await fileToUint8Array(f);
         v.mime = f.type;
         v.filename = f.name;
+        v.previewUrl = URL.createObjectURL(f);
         preview.textContent = f.name;
+        renderImagePreview();
       });
       row.append(fileInp, preview);
       card.appendChild(row);
+      renderImagePreview();
+      card.appendChild(imagePreview);
 
       // Image config controls
       const imgCfg = meta?.imageConfig || {};
@@ -2176,10 +2217,12 @@ async function renderForm() {
         const sel = document.createElement("select");
         sel.className = "input";
         sel.innerHTML = '<option value="width">宽度自适应</option><option value="height">高度自适应</option><option value="contain">等比缩放（约束内）</option>';
-        sel.value = imgCfg.fitMode || "width";
-        sel.addEventListener("change", () => {
+        sel.value = imgCfg.fitMode || DEFAULT_IMAGE_CONFIG.fitMode;
+        const syncFitMode = () => {
           ensureImageConfig(field.name).fitMode = sel.value;
-        });
+        };
+        sel.addEventListener("change", syncFitMode);
+        sel.addEventListener("input", syncFitMode);
         return sel;
       })());
       const ratioLabel = document.createElement("label");
@@ -2187,9 +2230,11 @@ async function renderForm() {
       const ratioCb = document.createElement("input");
       ratioCb.type = "checkbox";
       ratioCb.checked = imgCfg.maintainRatio !== false;
-      ratioCb.addEventListener("change", () => {
+      const syncMaintainRatio = () => {
         ensureImageConfig(field.name).maintainRatio = ratioCb.checked;
-      });
+      };
+      ratioCb.addEventListener("change", syncMaintainRatio);
+      ratioCb.addEventListener("input", syncMaintainRatio);
       ratioLabel.append(ratioCb, document.createTextNode(" 保持宽高比"));
       const ratioWrap = labeled("\xa0", ratioLabel);
       ratioWrap.style.flex = "0 0 auto";
@@ -2198,22 +2243,27 @@ async function renderForm() {
       const cfgRow2 = document.createElement("div");
       cfgRow2.className = "image-config-row image-config-dims";
       const dims = [
-        ["最大宽度", "maxWidth", imgCfg.maxWidth ?? 300],
-        ["最大高度", "maxHeight", imgCfg.maxHeight ?? 400],
-        ["最小宽度", "minWidth", imgCfg.minWidth ?? 50],
-        ["最小高度", "minHeight", imgCfg.minHeight ?? 50],
+        ["最大宽度", "maxWidth", imgCfg.maxWidth ?? DEFAULT_IMAGE_CONFIG.maxWidth],
+        ["最大高度", "maxHeight", imgCfg.maxHeight ?? DEFAULT_IMAGE_CONFIG.maxHeight],
+        ["最小宽度", "minWidth", imgCfg.minWidth ?? DEFAULT_IMAGE_CONFIG.minWidth],
+        ["最小高度", "minHeight", imgCfg.minHeight ?? DEFAULT_IMAGE_CONFIG.minHeight],
       ];
       for (const [lbl, key, val] of dims) {
         const inp = document.createElement("input");
         inp.type = "number";
         inp.className = "input";
-        inp.value = val;
-        inp.min = 1;
-        inp.max = 9999;
-        inp.addEventListener("change", () => {
-          ensureImageConfig(field.name)[key] = Number(inp.value) || val;
-        });
-        cfgRow2.appendChild(labeled(`${lbl} (px)`, inp));
+        inp.value = formatCm(val, DEFAULT_IMAGE_CONFIG[key]);
+        inp.min = 0.01;
+        inp.max = 999.99;
+        inp.step = 0.01;
+        const syncDim = () => {
+          const next = roundCm(Number(inp.value) || val);
+          ensureImageConfig(field.name)[key] = next;
+          inp.value = formatCm(next, val);
+        };
+        inp.addEventListener("change", syncDim);
+        inp.addEventListener("input", syncDim);
+        cfgRow2.appendChild(labeled(`${lbl} (cm)`, inp));
       }
 
       cfgSection.append(cfgRow1, cfgRow2);
@@ -2320,6 +2370,15 @@ function createFillStyleControls(fonts, occs, idx) {
 async function fillExport() {
   if (!state.templateBytes) return;
   setStatus("生成中…");
+
+  // Flush any focused image config inputs before reading state.
+  // Some browser/Tauri input controls can still hold the latest typed value
+  // until blur/change has propagated.
+  if (document.activeElement && typeof document.activeElement.blur === "function") {
+    document.activeElement.blur();
+  }
+
+  syncImageConfigsFromForm();
 
   // Sync per-occurrence descriptions from fill form back to occurrenceStyles
   for (const [key, override] of fillOccOverrides) {
@@ -2579,6 +2638,33 @@ function getImageConfigMap() {
     }
   }
   return imageConfigMap;
+}
+
+function syncImageConfigsFromForm() {
+  const cards = els.formSection.querySelectorAll(".field-card");
+  for (const card of cards) {
+    const nameEl = card.querySelector(".field-name");
+    const typeEl = card.querySelector(".field-type");
+    if (!nameEl || !typeEl) continue;
+    if ((typeEl.textContent || "").trim() !== "image") continue;
+    const name = (nameEl.textContent || "").trim();
+    if (!name) continue;
+    const meta = state.fieldMeta.get(name);
+    if (!meta) continue;
+    const fitSelect = card.querySelector("select.input");
+    const ratioCheckbox = card.querySelector("input[type='checkbox']");
+    const numberInputs = [...card.querySelectorAll("input.input[type='number']")];
+    if (numberInputs.length < 4) continue;
+    meta.imageConfig = {
+      fitMode: fitSelect?.value || meta.imageConfig?.fitMode || DEFAULT_IMAGE_CONFIG.fitMode,
+      maintainRatio: ratioCheckbox?.checked ?? (meta.imageConfig?.maintainRatio !== false),
+      maxWidth: roundCm(Number(numberInputs[0].value) || meta.imageConfig?.maxWidth || DEFAULT_IMAGE_CONFIG.maxWidth),
+      maxHeight: roundCm(Number(numberInputs[1].value) || meta.imageConfig?.maxHeight || DEFAULT_IMAGE_CONFIG.maxHeight),
+      minWidth: roundCm(Number(numberInputs[2].value) || meta.imageConfig?.minWidth || DEFAULT_IMAGE_CONFIG.minWidth),
+      minHeight: roundCm(Number(numberInputs[3].value) || meta.imageConfig?.minHeight || DEFAULT_IMAGE_CONFIG.minHeight),
+    };
+    state.fieldMeta.set(name, meta);
+  }
 }
 
 async function batchExportTemplate() {
