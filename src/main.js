@@ -1022,7 +1022,7 @@ function updateFieldSummary() {
         occ > 0
           ? `删除字段 "${name}"？\n这会从文档里移除 ${occ} 处占位符并删除元数据，不可撤销。`
           : `删除字段元数据 "${name}"？`;
-      if (!confirm(msg)) return;
+      if (!await showConfirm("删除字段", msg)) return;
       deleteField(name);
       renderParagraphList();
       updateFieldSummary();
@@ -2292,6 +2292,38 @@ els.btnFillExport.addEventListener("click", fillExport);
 // ============================================================
 // Batch: export template + Excel (edit mode)
 // ============================================================
+function showConfirm(title, message) {
+  const dlg = document.getElementById("confirm-dialog");
+  const titleEl = document.getElementById("confirm-dialog-title");
+  const msgEl = document.getElementById("confirm-dialog-message");
+  const cancelBtn = document.getElementById("confirm-dialog-cancel");
+  titleEl.textContent = title;
+  msgEl.textContent = message;
+  return new Promise((resolve) => {
+    function cleanup() {
+      cancelBtn.removeEventListener("click", onCancel);
+      dlg.removeEventListener("cancel", onCancel);
+      dlg.querySelector("form").removeEventListener("submit", onSubmit);
+    }
+    function onCancel(e) {
+      e?.preventDefault?.();
+      cleanup();
+      dlg.close();
+      resolve(false);
+    }
+    function onSubmit(e) {
+      e.preventDefault();
+      cleanup();
+      dlg.close();
+      resolve(true);
+    }
+    cancelBtn.addEventListener("click", onCancel);
+    dlg.addEventListener("cancel", onCancel);
+    dlg.querySelector("form").addEventListener("submit", onSubmit);
+    dlg.showModal();
+  });
+}
+
 function buildSampleDataForPreview() {
   const data = [{}];
   for (const f of state.fields) {
@@ -2451,9 +2483,9 @@ async function batchExportTemplate() {
     if (meta.type === "image") imageFieldNames.push(name);
   }
   if (imageFieldNames.length > 0) {
-    const ok = confirm(
-      `模板中包含图片字段（${imageFieldNames.join("、")}），Excel 无法批量填写图片。\n` +
-      `图片字段需要在「填写模板」中手动设置。\n\n是否继续导出？`
+    const ok = await showConfirm(
+      "图片字段提醒",
+      `模板中包含图片字段（${imageFieldNames.join("、")}），Excel 无法批量填写图片。\n图片字段需要在「填写模板」中手动设置。\n\n是否继续导出？`
     );
     if (!ok) return;
   }
