@@ -1,6 +1,8 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { writeTextFile, mkdir, exists } from "@tauri-apps/plugin-fs";
 import { renderAsync } from "docx-preview";
+import * as XLSX from "xlsx";
 import {
   PizZip,
   extractFieldsFromZip,
@@ -230,6 +232,8 @@ const els = {
   fillFilename: document.getElementById("fill-filename"),
   formSection: document.getElementById("form-section"),
   btnFillExport: document.getElementById("btn-fill-export"),
+  btnBatchExport: document.getElementById("btn-batch-export"),
+  btnBatchImport: document.getElementById("btn-batch-import"),
 
   status: document.getElementById("status"),
 };
@@ -617,6 +621,8 @@ function switchMode(mode) {
   els.modeFill.classList.toggle("hidden", mode !== "fill");
   els.btnEditSave.classList.toggle("hidden", !isEditor);
   els.btnFillExport.classList.toggle("hidden", mode !== "fill");
+  els.btnBatchExport.classList.toggle("hidden", mode !== "fill");
+  els.btnBatchImport.classList.toggle("hidden", mode !== "fill");
   if (els.previewZoomControls) {
     els.previewZoomControls.classList.toggle("hidden", !isEditor);
   }
@@ -1945,6 +1951,8 @@ async function fillLoad() {
     els.fillFilename.textContent = state.filename;
     setStatus(`已加载模板，发现 ${state.fields.length} 个字段`);
     await renderForm();
+    els.btnBatchExport.disabled = false;
+    els.btnBatchImport.disabled = false;
   } catch (e) {
     console.error(e);
     setStatus("加载失败：" + (e?.message || e), "error");
@@ -2280,6 +2288,297 @@ async function fillExport() {
 
 els.btnFillLoad.addEventListener("click", fillLoad);
 els.btnFillExport.addEventListener("click", fillExport);
+
+// ============================================================
+// Batch export / import
+// ============================================================
+function renderFilenamePreview(sampleData) {
+  const el = document.getElementById("filename-preview");
+  const pattern = document.getElementById("filename-pattern").value || "{n}";
+  const lines = [];
+  for (let i = 0; i < 3; i++) {
+    const row = sampleData[i] || {};
+    lines.push(formatFilename(pattern, row, i + 1) + ".docx");
+  }
+  if (sampleData.length > 3) lines.push(`… (共 ${sampleData.length} 个文件)`);
+  el.innerHTML = lines.map((l) => `<div class="preview-item">${escapeHtml(l)}</div>`).join("");
+}
+
+function formatFilename(pattern, row, n) {
+  let out = pattern.replace(/\{n\}/g, String(n));
+  out = out.replace(/\{(\w+)\}/g, (full, name) => {
+    const val = row[name];
+    if (val == null || val === "") return "";
+    // Sanitize filename chars
+    return String(val).replace(/[\\/:*?"<>|]/g, "_").substring(0, 50);
+  });
+  // Clean up consecutive underscores/spaces
+  out = out.replace(/[_\s]+/g, "_").replace(/^_|_$/g, "");
+  return out || `file_${n}`;
+}
+
+function openFilenameDialog(sampleData) {
+  const dlg = document.getElementById("filename-dialog");
+  const patternInput = document.getElementById("filename-pattern");
+  const tagsEl = document.getElementById("filename-field-tags");
+  const cancelBtn = document.getElementById("filename-dialog-cancel");
+
+  // Populate field tags
+  tagsEl.innerHTML = "";
+  tagsEl.appendChild((() => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "filename-field-tag";
+    b.textContent = "{n} 自动编号";
+    b.addEventListener("click", () => {
+      insertAtCursorSimple(patternInput, "{n}");
+      renderFilenamePreview(sampleData);
+    });
+    return b;
+  })());
+  for (const f of state.fields) {
+    if (f.type === "image") continue; // skip image fields for filename
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "filename-field-tag";
+    b.textContent = `{${f.name}}`;
+    b.addEventListener("click", () => {
+      insertAtCursorSimple(patternInput, `{${f.name}}`);
+      renderFilenamePreview(sampleData);
+    });
+    tagsEl.appendChild(b);
+  }
+
+  patternInput.value = state.filename.replace(/\.docx$/i, "") + "_{n}";
+  renderFilenamePreview(sampleData);
+
+  const onInput = () => renderFilenamePreview(sampleData);
+  patternInput.addEventListener("input", onInput);
+
+  return new Promise((resolve) => {
+    function cleanup() {
+      patternInput.removeEventListener("input", onInput);
+      cancelBtn.removeEventListener("click", onCancel);
+      dlg.removeEventListener("cancel", onCancel);
+      dlg.querySelector("form").removeEventListener("submit", onSubmit);
+    }
+    function onCancel(e) {
+      e?.preventDefault?.();
+      cleanup();
+      dlg.close();
+      resolve(null);
+    }
+    function onSubmit(e) {
+      e.preventDefault();
+      const val = patternInput.value.trim();
+      cleanup();
+      dlg.close();
+      resolve(val || "{n}");
+    }
+    cancelBtn.addEventListener("click", onCancel);
+    dlg.addEventListener("cancel", onCancel);
+    dlg.querySelector("form").addEventListener("submit", onSubmit);
+    dlg.showModal();
+    setTimeout(() => patternInput.focus(), 0);
+  });
+}
+
+function insertAtCursorSimple(input, text) {
+  const start = input.selectionStart;
+  const end = input.selectionEnd;
+  const old = input.value;
+  input.value = old.slice(0, start) + text + old.slice(end);
+  input.selectionStart = input.selectionEnd = start + text.length;
+  input.focus();
+}
+
+function getOccStyleMap() {
+  const occStyleMap = new Map();
+  for (const [, styles] of state.occurrenceStyles) {
+    for (const entry of styles) {
+      if (!entry || !entry.name) continue;
+      if (!occStyleMap.has(entry.name)) occStyleMap.set(entry.name, []);
+      occStyleMap.get(entry.name).push({
+        font: entry.font || "宋体",
+        size: entry.size ?? 12,
+        color: entry.color || "#000000",
+      });
+    }
+  }
+  return occStyleMap;
+}
+
+function getImageConfigMap() {
+  const imageConfigMap = new Map();
+  for (const [name, meta] of state.fieldMeta) {
+    if (meta.type === "image" && meta.imageConfig) {
+      imageConfigMap.set(name, meta.imageConfig);
+    }
+  }
+  return imageConfigMap;
+}
+
+async function batchExport() {
+  if (!state.templateBytes) return;
+
+  // Build sample data for preview (use current form values as first row)
+  const sampleData = [{}];
+  for (const f of state.fields) {
+    if (f.type === "text") {
+      sampleData[0][f.name] = state.values[f.name]?.text || "";
+    }
+  }
+
+  const pattern = await openFilenameDialog(sampleData);
+  if (!pattern) return;
+
+  // Select output folder
+  const folder = await open({ directory: true, title: "选择批量导出文件夹" });
+  if (!folder) {
+    setStatus("已取消");
+    return;
+  }
+  const folderPath = typeof folder === "string" ? folder : folder.path;
+
+  setStatus("批量导出中…");
+  try {
+    // 1. Export the blank Excel template
+    const excelRows = [];
+    // Header row: field names (text fields only for data, image fields noted)
+    const textFields = state.fields.filter((f) => f.type === "text");
+    const imageFields = state.fields.filter((f) => f.type === "image");
+    const headers = textFields.map((f) => f.name);
+    excelRows.push(headers);
+
+    // Pre-fill current values as first example row
+    const firstRow = textFields.map((f) => state.values[f.name]?.text || "");
+    excelRows.push(firstRow);
+    // Add 9 empty rows for the user to fill
+    for (let i = 0; i < 9; i++) {
+      excelRows.push(headers.map(() => ""));
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(excelRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "填写数据");
+
+    // Add a note about image fields
+    if (imageFields.length > 0) {
+      const noteRows = [
+        ["注意：以下图片字段需要手动处理（Excel 无法嵌入图片数据）："],
+        ...imageFields.map((f) => [`  - ${f.name}: ${f.description || ""}`]),
+      ];
+      const noteWs = XLSX.utils.aoa_to_sheet(noteRows);
+      XLSX.utils.book_append_sheet(wb, noteWs, "图片字段说明");
+    }
+
+    const excelBuf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    const excelName = state.filename.replace(/\.docx$/i, "") + "_批量填写模板.xlsx";
+    const excelPath = `${folderPath}/${excelName}`;
+    await invoke("save_bytes", { path: excelPath, bytes: Array.from(new Uint8Array(excelBuf)) });
+
+    // 2. Also export a blank filled Word as reference
+    const occStyleMap = getOccStyleMap();
+    const imageConfigMap = getImageConfigMap();
+    const emptyValues = {};
+    for (const f of state.fields) {
+      if (f.type === "text") emptyValues[f.name] = { text: "" };
+    }
+    const blankWord = renderFilled(state.templateBytes, state.fields, emptyValues, occStyleMap, imageConfigMap);
+    const blankName = state.filename.replace(/\.docx$/i, "") + "_空白模板.docx";
+    await invoke("save_bytes", { path: `${folderPath}/${blankName}`, bytes: Array.from(blankWord) });
+
+    setStatus(`已导出到 ${folderPath}：${excelName} + ${blankName}`, "success");
+  } catch (e) {
+    console.error(e);
+    setStatus("批量导出失败：" + (e?.message || e), "error");
+  }
+}
+
+async function batchImport() {
+  if (!state.templateBytes) return;
+
+  // 1. Pick the Excel file
+  const excelPath = await open({
+    multiple: false,
+    title: "选择填写好的 Excel 文件",
+    filters: [{ name: "Excel", extensions: ["xlsx", "xls"] }],
+  });
+  if (!excelPath) return;
+  const excelFilePath = typeof excelPath === "string" ? excelPath : excelPath.path;
+
+  // 2. Read Excel
+  let rows;
+  try {
+    const excelBytes = await readBytesFromPath(excelFilePath);
+    const wb = XLSX.read(excelBytes, { type: "array" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    if (data.length < 2) throw new Error("Excel 至少需要 2 行（表头 + 1 行数据）");
+    const headers = data[0].map((h) => String(h || "").trim());
+    rows = [];
+    for (let i = 1; i < data.length; i++) {
+      const row = {};
+      let hasData = false;
+      for (let j = 0; j < headers.length; j++) {
+        const val = data[i]?.[j];
+        row[headers[j]] = val != null ? String(val) : "";
+        if (val != null && String(val).trim() !== "") hasData = true;
+      }
+      if (hasData) rows.push(row);
+    }
+    if (rows.length === 0) throw new Error("Excel 中没有有效数据行");
+  } catch (e) {
+    setStatus("读取 Excel 失败：" + (e?.message || e), "error");
+    return;
+  }
+
+  // 3. Open filename pattern dialog
+  const pattern = await openFilenameDialog(rows);
+  if (!pattern) return;
+
+  // 4. Select output folder
+  const folder = await open({ directory: true, title: "选择批量导出文件夹" });
+  if (!folder) {
+    setStatus("已取消");
+    return;
+  }
+  const folderPath = typeof folder === "string" ? folder : folder.path;
+
+  // 5. Generate Word files
+  setStatus(`批量生成中（共 ${rows.length} 个）…`);
+  let success = 0;
+  let fail = 0;
+  const occStyleMap = getOccStyleMap();
+  const imageConfigMap = getImageConfigMap();
+
+  for (let i = 0; i < rows.length; i++) {
+    try {
+      const values = {};
+      for (const f of state.fields) {
+        if (f.type === "text") {
+          values[f.name] = { text: rows[i][f.name] || "" };
+        } else {
+          // Image fields: try to get from current form values (user must set manually)
+          values[f.name] = { bytes: state.values[f.name]?.bytes };
+        }
+      }
+      const out = renderFilled(state.templateBytes, state.fields, values, occStyleMap, imageConfigMap);
+      const fileName = formatFilename(pattern, rows[i], i + 1) + ".docx";
+      const filePath = `${folderPath}/${fileName}`;
+      await invoke("save_bytes", { path: filePath, bytes: Array.from(out) });
+      success++;
+    } catch (e) {
+      console.error(`Row ${i + 1} failed:`, e);
+      fail++;
+    }
+  }
+
+  setStatus(`批量生成完成：成功 ${success} 个${fail > 0 ? `，失败 ${fail} 个` : ""}。输出：${folderPath}`, success > 0 ? "success" : "error");
+}
+
+els.btnBatchExport.addEventListener("click", batchExport);
+els.btnBatchImport.addEventListener("click", batchImport);
 
 // Initial state
 switchMode("edit");

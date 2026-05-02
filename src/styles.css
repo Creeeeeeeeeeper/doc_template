@@ -869,6 +869,52 @@ body {
   color: var(--text-muted);
   margin-bottom: 8px;
 }
+
+/* Filename pattern dialog */
+.filename-template-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.filename-field-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.filename-field-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text);
+  font-family: inherit;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.filename-field-tag:hover {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: #1e40af;
+}
+.filename-preview {
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-height: 36px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.filename-preview .preview-item {
+  color: var(--text-muted);
+}
+.filename-preview .preview-item:first-child {
+  color: var(--text);
+  font-weight: 500;
+}
 .dialog-format-row {
   display: flex;
   gap: 8px;

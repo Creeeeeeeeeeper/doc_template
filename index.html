@@ -113,6 +113,12 @@
         <button id="btn-fill-export" class="btn btn-success hidden" disabled>
           生成并保存 DOCX
         </button>
+        <button id="btn-batch-export" class="btn hidden" disabled>
+          📦 批量导出模板
+        </button>
+        <button id="btn-batch-import" class="btn hidden" disabled>
+          📥 批量导入填写
+        </button>
       </footer>
     </main>
 
@@ -204,6 +210,31 @@
           <button type="submit" id="field-dialog-ok" class="btn btn-primary">
             确定
           </button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Filename pattern dialog for batch export/import -->
+    <dialog id="filename-dialog" class="field-dialog">
+      <form id="filename-dialog-form">
+        <h3 class="dialog-title">批量文件名设置</h3>
+        <div class="dialog-row">
+          <label>文件名模板</label>
+          <div class="filename-template-input-wrap">
+            <input id="filename-pattern" type="text" class="input" placeholder="例如：合同_{partyA}_{n}" autocomplete="off" />
+            <div id="filename-field-tags" class="filename-field-tags"></div>
+          </div>
+          <p class="dialog-hint" style="margin-top:4px">
+            <code>{n}</code> 自动编号(1,2,3…) · <code>{字段名}</code> 插入字段值 · 其他文字原样保留
+          </p>
+        </div>
+        <div class="dialog-row">
+          <label>预览</label>
+          <div id="filename-preview" class="filename-preview"></div>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" id="filename-dialog-cancel" class="btn">取消</button>
+          <button type="submit" class="btn btn-primary">确定</button>
         </div>
       </form>
     </dialog>
