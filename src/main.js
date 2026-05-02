@@ -895,7 +895,8 @@ function annotateImagePlaceholders() {
   removeImagePlaceholderAnnotations();
   const ps = els.previewContainer.querySelectorAll(".preview-paragraph");
   for (const p of ps) {
-    const text = p.textContent;
+    const text = p.textContent || "";
+    if (!text.includes("{%")) continue;
     const re = /\{%(\w+)\}/g;
     let m;
     while ((m = re.exec(text)) !== null) {
@@ -931,7 +932,7 @@ function findTextRangeInElement(root, searchText) {
   const offsets = []; // [{node, startInFull}]
   for (const n of textNodes) {
     offsets.push({ node, startInFull: fullText.length });
-    fullText += n.textContent;
+    fullText += n.textContent || "";
   }
   const idx = fullText.indexOf(searchText);
   if (idx < 0) return null;
@@ -940,7 +941,8 @@ function findTextRangeInElement(root, searchText) {
   // Find start node
   for (const o of offsets) {
     const localStart = idx - o.startInFull;
-    if (localStart >= 0 && localStart < o.node.textContent.length) {
+    const nodeLen = (o.node.textContent || "").length;
+    if (localStart >= 0 && localStart < nodeLen) {
       range.setStart(o.node, localStart);
       break;
     }
@@ -948,7 +950,8 @@ function findTextRangeInElement(root, searchText) {
   // Find end node
   for (const o of offsets) {
     const localEnd = endIdx - o.startInFull;
-    if (localEnd > 0 && localEnd <= o.node.textContent.length) {
+    const nodeLen = (o.node.textContent || "").length;
+    if (localEnd > 0 && localEnd <= nodeLen) {
       range.setEnd(o.node, localEnd);
       break;
     }
