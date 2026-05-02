@@ -2450,8 +2450,12 @@ async function batchExportTemplate() {
     });
 
     // 2. Build Excel template
-    const textFields = state.fields.filter((f) => f.type === "text");
-    const imageFields = state.fields.filter((f) => f.type === "image");
+    const textFields = [];
+    const imageFields = [];
+    for (const [name, meta] of state.fieldMeta) {
+      if (meta.type === "image") imageFields.push({ name, ...meta });
+      else textFields.push({ name, ...meta });
+    }
     const headers = textFields.map((f) => f.name);
     const rows = [headers];
     // 10 empty rows for the user to fill
