@@ -159,6 +159,45 @@
             <input id="field-dialog-color" type="color" class="color-input" />
           </div>
         </div>
+        <div id="field-dialog-image-config" class="dialog-row dialog-image-config hidden">
+          <label>图片尺寸</label>
+          <div class="image-config-grid">
+            <div class="image-config-row">
+              <label class="labeled">
+                <span>自适应模式</span>
+                <select id="field-dialog-fit-mode" class="input">
+                  <option value="width">宽度自适应</option>
+                  <option value="height">高度自适应</option>
+                  <option value="contain">等比缩放（约束内）</option>
+                </select>
+              </label>
+              <label class="labeled image-config-check">
+                <span>&nbsp;</span>
+                <label class="checkbox-label">
+                  <input type="checkbox" id="field-dialog-maintain-ratio" checked /> 保持宽高比
+                </label>
+              </label>
+            </div>
+            <div class="image-config-row image-config-dims">
+              <label class="labeled">
+                <span>最大宽度 (px)</span>
+                <input type="number" id="field-dialog-max-w" class="input" value="300" min="1" max="9999" />
+              </label>
+              <label class="labeled">
+                <span>最大高度 (px)</span>
+                <input type="number" id="field-dialog-max-h" class="input" value="400" min="1" max="9999" />
+              </label>
+              <label class="labeled">
+                <span>最小宽度 (px)</span>
+                <input type="number" id="field-dialog-min-w" class="input" value="50" min="1" max="9999" />
+              </label>
+              <label class="labeled">
+                <span>最小高度 (px)</span>
+                <input type="number" id="field-dialog-min-h" class="input" value="50" min="1" max="9999" />
+              </label>
+            </div>
+          </div>
+        </div>
         <p id="field-dialog-hint" class="dialog-hint"></p>
         <div class="dialog-actions">
           <button type="button" id="field-dialog-cancel" class="btn">取消</button>

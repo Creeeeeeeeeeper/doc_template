@@ -222,6 +222,7 @@ body {
   overflow: auto;
   padding: 18px;
   background: #eceff3;
+  position: relative;
 }
 .preview-container > .empty-state {
   background: var(--surface);
@@ -821,6 +822,74 @@ body {
 
 .dialog-format.hidden {
   display: none;
+}
+.dialog-image-config.hidden {
+  display: none;
+}
+.image-config-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.image-config-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.image-config-row .labeled {
+  flex: 1;
+  min-width: 100px;
+}
+.image-config-check {
+  flex: 0 0 auto !important;
+  min-width: auto !important;
+}
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  padding: 7px 0;
+}
+.image-config-dims .labeled input[type="number"] {
+  width: 80px;
+}
+.image-config-section {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.image-config-section .image-config-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.image-placeholder-rect {
+  position: absolute;
+  border: 2px dashed #6b7fa3;
+  background: rgba(107, 127, 163, 0.06);
+  pointer-events: none;
+  z-index: 10;
+}
+.image-placeholder-label {
+  position: absolute;
+  top: -20px;
+  left: -2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a6785;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #9aafc4;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  line-height: 1.4;
 }
 .dialog-format-row {
   display: flex;

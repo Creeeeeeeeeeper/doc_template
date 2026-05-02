@@ -244,10 +244,45 @@ export function preprocessTemplateForFill(zip, styleMap) {
 // ----------------------------------------------------------------
 // Fill rendering
 // ----------------------------------------------------------------
+// Read image dimensions from file bytes (supports PNG/JPEG/GIF).
+// Returns { naturalW, naturalH } or null.
+function getImageDimensions(bytes) {
+  if (!bytes || bytes.length < 16) return null;
+  try {
+    // PNG: 8-byte signature, then IHDR chunk (width at offset 16, height at 20)
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return { naturalW: view.getUint32(16), naturalH: view.getUint32(20) };
+    }
+    // GIF: width at offset 6, height at 8
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      return { naturalW: view.getUint16(6), naturalH: view.getUint16(8) };
+    }
+    // JPEG: scan for SOF marker
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8) {
+      let offset = 2;
+      while (offset < bytes.length - 1) {
+        if (bytes[offset] !== 0xFF) { offset++; continue; }
+        const marker = bytes[offset + 1];
+        if (marker === 0xC0 || marker === 0xC1 || marker === 0xC2) {
+          const view = new DataView(bytes.buffer, bytes.byteOffset + offset + 5, 4);
+          return { naturalH: view.getUint16(0), naturalW: view.getUint16(2) };
+        }
+        if (marker === 0xD9 || marker === 0xDA) break;
+        const segLen = new DataView(bytes.buffer, bytes.byteOffset + offset + 2, 2).getUint16(0);
+        offset += 2 + segLen;
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return null;
+}
+
 // values: { fieldName: { type:'text', text, font, size, color } |
 //                       { type:'image', bytes: Uint8Array } }
+// imageConfigMap: Map<fieldName, imageConfig>
 // Returns Uint8Array of the rendered docx bytes.
-export function renderFilled(templateBytes, fields, values, occStyleMap) {
+export function renderFilled(templateBytes, fields, values, occStyleMap, imageConfigMap) {
   const zip = new PizZip(templateBytes);
 
   // Strip editor-only metadata; the filled doc has no use for it, and a
@@ -274,10 +309,59 @@ export function renderFilled(templateBytes, fields, values, occStyleMap) {
   preprocessTemplateForFill(zip, styleMap);
 
   const imageMap = new Map();
+  const imageDimCache = new Map(); // tagName -> { naturalW, naturalH }
+
   const imageModule = new ImageModule({
     centered: false,
-    getImage: (_tagValue, tagName) => imageMap.get(tagName),
-    getSize: () => [240, 240],
+    getImage: (_tagValue, tagName) => {
+      const bytes = imageMap.get(tagName);
+      if (!bytes) return bytes;
+      // Pre-read natural dimensions from the image bytes
+      if (!imageDimCache.has(tagName)) {
+        imageDimCache.set(tagName, getImageDimensions(bytes));
+      }
+      return bytes;
+    },
+    getSize: (tagValue, _imageData) => {
+      const config = (imageConfigMap && imageConfigMap.get(tagValue)) || {};
+      const {
+        fitMode = "width",
+        maintainRatio = true,
+        maxWidth = 300,
+        maxHeight = 400,
+        minWidth = 50,
+        minHeight = 50,
+      } = config;
+
+      const dims = imageDimCache.get(tagValue);
+      const natW = dims?.naturalW || 0;
+      const natH = dims?.naturalH || 0;
+      const ratio = natW > 0 && natH > 0 ? natW / natH : 1;
+
+      let w, h;
+      if (fitMode === "height") {
+        h = maxHeight;
+        w = maintainRatio ? Math.round(h * ratio) : maxWidth;
+      } else if (fitMode === "contain") {
+        // Fit inside maxWidth × maxHeight box
+        const boxRatio = maxWidth / maxHeight;
+        if (ratio > boxRatio) {
+          w = maxWidth;
+          h = maintainRatio ? Math.round(w / ratio) : maxHeight;
+        } else {
+          h = maxHeight;
+          w = maintainRatio ? Math.round(h * ratio) : maxWidth;
+        }
+      } else {
+        // "width" (default)
+        w = maxWidth;
+        h = maintainRatio ? Math.round(w / ratio) : maxHeight;
+      }
+
+      w = Math.max(minWidth, Math.min(maxWidth, w));
+      h = Math.max(minHeight, Math.min(maxHeight, h));
+      return [w, h];
+    },
   });
 
   const doc = new Docxtemplater(zip, {
@@ -424,12 +508,18 @@ export function buildTemplate(templateBytes, paragraphs, fieldMeta, occurrenceSt
       }
     }
     const data = {
-      version: 3,
-      fields: [...fieldMeta.entries()].map(([name, m]) => ({
-        name,
-        type: m.type || "text",
-        description: m.description || "",
-      })),
+      version: 4,
+      fields: [...fieldMeta.entries()].map(([name, m]) => {
+        const entry = {
+          name,
+          type: m.type || "text",
+          description: m.description || "",
+        };
+        if (m.type === "image" && m.imageConfig) {
+          entry.imageConfig = { ...m.imageConfig };
+        }
+        return entry;
+      }),
       occStyles: occEntries,
     };
     zip.file("template/fields.json", JSON.stringify(data, null, 2));
@@ -441,6 +531,15 @@ export function buildTemplate(templateBytes, paragraphs, fieldMeta, occurrenceSt
   return zip.generate({ type: "uint8array" });
 }
 
+const DEFAULT_IMAGE_CONFIG = {
+  fitMode: "width",
+  maintainRatio: true,
+  maxWidth: 300,
+  maxHeight: 400,
+  minWidth: 50,
+  minHeight: 50,
+};
+
 export function readFieldMeta(zip) {
   const file = zip.file("template/fields.json");
   if (!file) return { fieldMeta: new Map(), occStyles: new Map() };
@@ -449,10 +548,22 @@ export function readFieldMeta(zip) {
     const map = new Map();
     for (const f of data.fields || []) {
       if (!f.name) continue;
-      map.set(f.name, {
+      const entry = {
         type: f.type === "image" ? "image" : "text",
         description: f.description || "",
-      });
+      };
+      if (entry.type === "image") {
+        const ic = f.imageConfig || {};
+        entry.imageConfig = {
+          fitMode: ic.fitMode || DEFAULT_IMAGE_CONFIG.fitMode,
+          maintainRatio: ic.maintainRatio !== false,
+          maxWidth: Number(ic.maxWidth) || DEFAULT_IMAGE_CONFIG.maxWidth,
+          maxHeight: Number(ic.maxHeight) || DEFAULT_IMAGE_CONFIG.maxHeight,
+          minWidth: Number(ic.minWidth) || DEFAULT_IMAGE_CONFIG.minWidth,
+          minHeight: Number(ic.minHeight) || DEFAULT_IMAGE_CONFIG.minHeight,
+        };
+      }
+      map.set(f.name, entry);
     }
     const occStyles = new Map();
     for (const entry of data.occStyles || []) {

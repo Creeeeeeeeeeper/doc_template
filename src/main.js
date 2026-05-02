@@ -288,6 +288,8 @@ function applyPreviewZoom() {
     docx.style.marginBottom = "14px";
   }
   updateZoomUI();
+  // Re-annotate after zoom changes
+  annotateImagePlaceholders();
 }
 
 function setPreviewScale(scale) {
@@ -788,10 +790,7 @@ async function insertAtSelection(type) {
   state.fieldMeta.set(name, {
     type: fieldType,
     description,
-    defaultFont: defaultFont || null,
-    defaultSize: defaultSize ?? null,
-    defaultSizeLabel: defaultSizeLabel || null,
-    defaultColor: defaultColor || null,
+    ...(fieldType === "image" && result.imageConfig ? { imageConfig: result.imageConfig } : {}),
   });
 
   const placeholder = fieldType === "image" ? `{%${name}}` : `{@${name}}`;
@@ -823,6 +822,7 @@ els.btnInsertImage.addEventListener("click", () => insertAtSelection("image"));
 async function renderPreview(bytes) {
   const container = els.previewContainer;
   container.innerHTML = "";
+  removeImagePlaceholderAnnotations();
   const blob = new Blob([bytes], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   });
@@ -874,12 +874,86 @@ async function renderPreview(bytes) {
   } else {
     applyPreviewZoom();
   }
+
+  // Annotate image placeholders with dashed borders
+  annotateImagePlaceholders();
 }
 
 function clearActivePreview() {
   els.previewContainer
     .querySelectorAll(".preview-paragraph.active")
     .forEach((p) => p.classList.remove("active"));
+}
+
+function removeImagePlaceholderAnnotations() {
+  els.previewContainer
+    .querySelectorAll(".image-placeholder-rect")
+    .forEach((el) => el.remove());
+}
+
+function annotateImagePlaceholders() {
+  removeImagePlaceholderAnnotations();
+  const ps = els.previewContainer.querySelectorAll(".preview-paragraph");
+  for (const p of ps) {
+    const text = p.textContent;
+    const re = /\{%(\w+)\}/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const placeholder = m[0];
+      const fieldName = m[1];
+      // Walk text nodes to find the exact range
+      const range = findTextRangeInElement(p, placeholder);
+      if (!range) continue;
+      const rect = range.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      const containerRect = els.previewContainer.getBoundingClientRect();
+      const overlay = document.createElement("div");
+      overlay.className = "image-placeholder-rect";
+      overlay.innerHTML = `<span class="image-placeholder-label">{%${fieldName}}</span>`;
+      overlay.style.left = `${rect.left - containerRect.left + els.previewContainer.scrollLeft}px`;
+      overlay.style.top = `${rect.top - containerRect.top + els.previewContainer.scrollTop}px`;
+      overlay.style.width = `${rect.width}px`;
+      overlay.style.height = `${rect.height}px`;
+      els.previewContainer.appendChild(overlay);
+    }
+  }
+}
+
+function findTextRangeInElement(root, searchText) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    textNodes.push(node);
+  }
+  // Concatenate all text content and find the search string
+  let fullText = "";
+  const offsets = []; // [{node, startInFull}]
+  for (const n of textNodes) {
+    offsets.push({ node, startInFull: fullText.length });
+    fullText += n.textContent;
+  }
+  const idx = fullText.indexOf(searchText);
+  if (idx < 0) return null;
+  const endIdx = idx + searchText.length;
+  const range = document.createRange();
+  // Find start node
+  for (const o of offsets) {
+    const localStart = idx - o.startInFull;
+    if (localStart >= 0 && localStart < o.node.textContent.length) {
+      range.setStart(o.node, localStart);
+      break;
+    }
+  }
+  // Find end node
+  for (const o of offsets) {
+    const localEnd = endIdx - o.startInFull;
+    if (localEnd > 0 && localEnd <= o.node.textContent.length) {
+      range.setEnd(o.node, localEnd);
+      break;
+    }
+  }
+  return range;
 }
 
 function autoResizeEditor(editor) {
@@ -976,6 +1050,7 @@ function updateFieldSummary() {
         type: info.type,
         name,
         description: meta?.description || "",
+        imageConfig: meta?.imageConfig || null,
         // Name is editable — submit handler validates & runs renameField.
         lockName: false,
         // Type can't change once placeholders exist in the doc, since
@@ -984,6 +1059,7 @@ function updateFieldSummary() {
         existingName: name,
         hideDescription: false,
         hideFormat: true,
+        hideImageConfig: false,
       });
       if (!updated) return;
 
@@ -995,6 +1071,9 @@ function updateFieldSummary() {
         type: updated.type,
         description: updated.description,
       };
+      if (updated.imageConfig) {
+        finalMeta.imageConfig = updated.imageConfig;
+      }
       state.fieldMeta.set(updated.name, finalMeta);
 
       renderParagraphList();
@@ -1172,6 +1251,13 @@ const fieldDialogEls = {
   fontSlot: document.getElementById("field-dialog-font-slot"),
   size: document.getElementById("field-dialog-size"),
   color: document.getElementById("field-dialog-color"),
+  imageConfig: document.getElementById("field-dialog-image-config"),
+  fitMode: document.getElementById("field-dialog-fit-mode"),
+  maintainRatio: document.getElementById("field-dialog-maintain-ratio"),
+  maxW: document.getElementById("field-dialog-max-w"),
+  maxH: document.getElementById("field-dialog-max-h"),
+  minW: document.getElementById("field-dialog-min-w"),
+  minH: document.getElementById("field-dialog-min-h"),
 };
 
 let dialogFontPicker = null;
@@ -1201,7 +1287,7 @@ function ensureDialogSizeOptions() {
 
 // Open the add/edit field modal. Returns Promise<FieldMeta|null> where
 // FieldMeta = { name, type, description, defaultFont, defaultSize,
-//               defaultSizeLabel, defaultColor }.
+//               defaultSizeLabel, defaultColor, imageConfig }.
 async function openFieldDialog(defaults = {}) {
   const {
     type = "text",
@@ -1211,12 +1297,14 @@ async function openFieldDialog(defaults = {}) {
     defaultSize = null,
     defaultSizeLabel = null,
     defaultColor = null,
+    imageConfig = null,
     detectedFromXml = false, // when true, show "(已检测)" hint
     title = "添加字段",
     lockType = false,
     lockName = false,
     hideDescription = false,
     hideFormat = false,
+    hideImageConfig = false,
     // When set, this dialog is editing an existing field; the submit
     // handler must allow `name` to equal `existingName` even though that
     // name is "already taken" (it's just unchanged), and warn before
@@ -1262,13 +1350,22 @@ async function openFieldDialog(defaults = {}) {
       : "";
     fieldDialogEls.format.classList.toggle("hidden", type === "image" || hideFormat);
 
+    // Image config defaults
+    const ic = imageConfig || {};
+    fieldDialogEls.fitMode.value = ic.fitMode || "width";
+    fieldDialogEls.maintainRatio.checked = ic.maintainRatio !== false;
+    fieldDialogEls.maxW.value = ic.maxWidth ?? 300;
+    fieldDialogEls.maxH.value = ic.maxHeight ?? 400;
+    fieldDialogEls.minW.value = ic.minWidth ?? 50;
+    fieldDialogEls.minH.value = ic.minHeight ?? 50;
+    fieldDialogEls.imageConfig.classList.toggle("hidden", type !== "image" || hideImageConfig);
+
     let descTouched = !!description;
 
     function onTypeChange() {
-      fieldDialogEls.format.classList.toggle(
-        "hidden",
-        fieldDialogEls.type.value === "image" || hideFormat,
-      );
+      const isImage = fieldDialogEls.type.value === "image";
+      fieldDialogEls.format.classList.toggle("hidden", isImage || hideFormat);
+      fieldDialogEls.imageConfig.classList.toggle("hidden", !isImage || hideImageConfig);
     }
     function onNameInput() {
       const n = fieldDialogEls.name.value.trim();
@@ -1359,6 +1456,15 @@ async function openFieldDialog(defaults = {}) {
         result.defaultSizeLabel = opt?.value || null;
         result.defaultSize = opt ? Number(opt.dataset.pt) : null;
         result.defaultColor = fieldDialogEls.color.value || null;
+      } else {
+        result.imageConfig = {
+          fitMode: fieldDialogEls.fitMode.value,
+          maintainRatio: fieldDialogEls.maintainRatio.checked,
+          maxWidth: Number(fieldDialogEls.maxW.value) || 300,
+          maxHeight: Number(fieldDialogEls.maxH.value) || 400,
+          minWidth: Number(fieldDialogEls.minW.value) || 50,
+          minHeight: Number(fieldDialogEls.minH.value) || 50,
+        };
       }
       cleanup();
       fieldDialogEls.dlg.close();
@@ -1613,15 +1719,17 @@ function renderParagraphList() {
       const styles = state.occurrenceStyles.get(p.index) || [];
       const curStyle = styles[occurrenceIdx] || {};
       const detected = getRunStyleAt(p.originalXml, savedSel.start);
+      const existingMeta = state.fieldMeta.get(name);
       const result = await openFieldDialog({
         title: `编辑占位符 {${sigil}${name}}`,
         type: sigil === "%" ? "image" : "text",
         name,
-        description: (state.fieldMeta.get(name)?.description) || "",
+        description: (existingMeta?.description) || "",
         defaultFont: curStyle.font || detected?.font || null,
         defaultSize: curStyle.size ?? detected?.size ?? null,
         defaultSizeLabel: curStyle.sizeLabel || (curStyle.size != null ? findSizeByValue(curStyle.size)?.label : null) || null,
         defaultColor: curStyle.color || detected?.color || null,
+        imageConfig: existingMeta?.imageConfig || null,
         detectedFromXml: !curStyle.font && !!detected,
         lockType: true,
         lockName: false,
@@ -1634,6 +1742,14 @@ function renderParagraphList() {
         renameField(name, result.name);
         syncOccurrenceStyles();
         ed.innerHTML = textToEditorHtml(p.currentText, p.index);
+      }
+      // Update imageConfig for image fields
+      if (result.imageConfig) {
+        const meta = state.fieldMeta.get(result.name);
+        if (meta) {
+          meta.imageConfig = result.imageConfig;
+          state.fieldMeta.set(result.name, meta);
+        }
       }
       if (occurrenceIdx >= 0 && occurrenceIdx < styles.length) {
         styles[occurrenceIdx] = {
@@ -1714,6 +1830,7 @@ function renderParagraphList() {
       state.fieldMeta.set(result.name, {
         type: result.type,
         description: result.description,
+        ...(result.imageConfig ? { imageConfig: result.imageConfig } : {}),
       });
       ed.focus();
       insertAtCursor(
@@ -1879,6 +1996,7 @@ els.previewContainer.addEventListener(
 
 window.addEventListener("resize", () => {
   if (previewFitWidth) applyPreviewZoom();
+  else annotateImagePlaceholders();
 });
 
 // ============================================================
@@ -1926,6 +2044,22 @@ function findSizeByLabel(label) {
 function findSizeByValue(value) {
   // Prefer the Chinese name when both exist for the same pt
   return ALL_SIZE_PRESETS.find((s) => Number(s.value) === Number(value));
+}
+
+function ensureImageConfig(name) {
+  const meta = state.fieldMeta.get(name);
+  if (!meta) return null;
+  if (!meta.imageConfig) {
+    meta.imageConfig = {
+      fitMode: "width",
+      maintainRatio: true,
+      maxWidth: 300,
+      maxHeight: 400,
+      minWidth: 50,
+      minHeight: 50,
+    };
+  }
+  return meta.imageConfig;
 }
 
 async function renderForm() {
@@ -2021,6 +2155,64 @@ async function renderForm() {
       });
       row.append(fileInp, preview);
       card.appendChild(row);
+
+      // Image config controls
+      const imgCfg = meta?.imageConfig || {};
+      const cfgSection = document.createElement("div");
+      cfgSection.className = "image-config-section";
+      const cfgTitle = document.createElement("div");
+      cfgTitle.className = "image-config-title";
+      cfgTitle.textContent = "尺寸配置";
+      cfgSection.appendChild(cfgTitle);
+
+      const cfgRow1 = document.createElement("div");
+      cfgRow1.className = "image-config-row";
+      const fitSel = labeled("自适应模式", (() => {
+        const sel = document.createElement("select");
+        sel.className = "input";
+        sel.innerHTML = '<option value="width">宽度自适应</option><option value="height">高度自适应</option><option value="contain">等比缩放（约束内）</option>';
+        sel.value = imgCfg.fitMode || "width";
+        sel.addEventListener("change", () => {
+          ensureImageConfig(field.name).fitMode = sel.value;
+        });
+        return sel;
+      })());
+      const ratioLabel = document.createElement("label");
+      ratioLabel.className = "checkbox-label";
+      const ratioCb = document.createElement("input");
+      ratioCb.type = "checkbox";
+      ratioCb.checked = imgCfg.maintainRatio !== false;
+      ratioCb.addEventListener("change", () => {
+        ensureImageConfig(field.name).maintainRatio = ratioCb.checked;
+      });
+      ratioLabel.append(ratioCb, document.createTextNode(" 保持宽高比"));
+      const ratioWrap = labeled("\xa0", ratioLabel);
+      ratioWrap.style.flex = "0 0 auto";
+      cfgRow1.append(fitSel, ratioWrap);
+
+      const cfgRow2 = document.createElement("div");
+      cfgRow2.className = "image-config-row image-config-dims";
+      const dims = [
+        ["最大宽度", "maxWidth", imgCfg.maxWidth ?? 300],
+        ["最大高度", "maxHeight", imgCfg.maxHeight ?? 400],
+        ["最小宽度", "minWidth", imgCfg.minWidth ?? 50],
+        ["最小高度", "minHeight", imgCfg.minHeight ?? 50],
+      ];
+      for (const [lbl, key, val] of dims) {
+        const inp = document.createElement("input");
+        inp.type = "number";
+        inp.className = "input";
+        inp.value = val;
+        inp.min = 1;
+        inp.max = 9999;
+        inp.addEventListener("change", () => {
+          ensureImageConfig(field.name)[key] = Number(inp.value) || val;
+        });
+        cfgRow2.appendChild(labeled(`${lbl} (px)`, inp));
+      }
+
+      cfgSection.append(cfgRow1, cfgRow2);
+      card.appendChild(cfgSection);
       els.formSection.appendChild(card);
     }
   }
@@ -2113,6 +2305,7 @@ async function fillExport() {
   try {
     const values = {};
     const occStyleMap = new Map(); // name -> [{font, size, color}, ...]
+    const imageConfigMap = new Map(); // name -> imageConfig
 
     // Build occStyleMap from occurrenceStyles (entries include name)
     for (const [, styles] of state.occurrenceStyles) {
@@ -2127,6 +2320,13 @@ async function fillExport() {
       }
     }
 
+    // Build imageConfigMap from fieldMeta
+    for (const [name, meta] of state.fieldMeta) {
+      if (meta.type === "image" && meta.imageConfig) {
+        imageConfigMap.set(name, meta.imageConfig);
+      }
+    }
+
     for (const f of state.fields) {
       const v = state.values[f.name];
       if (f.type === "text") {
@@ -2137,7 +2337,7 @@ async function fillExport() {
         values[f.name] = { bytes: v?.bytes };
       }
     }
-    const out = renderFilled(state.templateBytes, state.fields, values, occStyleMap);
+    const out = renderFilled(state.templateBytes, state.fields, values, occStyleMap, imageConfigMap);
     const suggested = state.filename.replace(/\.docx$/i, "") + "-filled.docx";
     const target = await saveBytesViaDialog(suggested, out);
     if (!target) {

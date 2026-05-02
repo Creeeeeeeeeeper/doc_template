@@ -2,9 +2,9 @@
 
 一个用 Tauri 2 + Vite 写的桌面应用，把"在 Word 里挖空 + 别人填表"这件事拆成三个模式：
 
-1. **制作模板** 📝：导入任意 `.docx`，在原格式预览里点光标 / 选文字，插入 `{@field}`（文字）或 `{%field}`（图片）占位符，保存为模板。占位符在编辑区渲染为高亮块，支持双击编辑、右键删除、Backspace 整块删除。
-2. **修改模板** 🔧：导入做好的模板，重命名 / 删除字段、改描述 —— 重命名会自动同步文档里所有占位符。双击任意占位符可修改名称和该位置的样式。
-3. **填写模板** ✏️：导入模板，应用自动识别字段并生成表单。同一字段名出现在多处时，各处独立保存字体/字号/颜色，文本内容联动同步。图片字段直接上传 PNG/JPG，最后导出填好的 `.docx`。
+1. **制作模板** 📝：导入任意 `.docx`，在原格式预览里点光标 / 选文字，插入 `{@field}`（文字）或 `{%field}`（图片）占位符，保存为模板。占位符在编辑区渲染为高亮块，支持双击编辑、右键删除、Backspace 整块删除。图片占位符在左侧预览中以蓝灰色虚线框标注名称。
+2. **修改模板** 🔧：导入做好的模板，重命名 / 删除字段、改描述 —— 重命名会自动同步文档里所有占位符。双击图片占位符可修改名称和图片尺寸配置（自适应模式、等比缩放、最大最小宽高）。
+3. **填写模板** ✏️：导入模板，应用自动识别字段并生成表单。同一字段名出现在多处时，各处独立保存字体/字号/颜色，文本内容联动同步。图片字段可配置尺寸（宽度/高度/等比自适应），填写时自动按实际图片尺寸和配置计算最终大小，最后导出填好的 `.docx`。
 
 整个流程都在本地完成，不需要服务端、不需要 Word/WPS 安装。打包后是个 ~10MB 的单文件桌面程序。
 
@@ -34,8 +34,9 @@
 |  | 占位符渲染为高亮块（蓝色=文字，粉色=图片），`contenteditable` 编辑 |
 |  | Backspace / Delete 命中占位符时整块删除，不按字符删 |
 |  | 右键占位符弹出"删除占位符"菜单 |
-|  | 双击占位符弹出编辑框，可修改名称和该位置的字体 / 字号 / 颜色 |
+|  | 双击占位符弹出编辑框，可修改名称和该位置的字体 / 字号 / 颜色（文字）或图片尺寸配置（图片） |
 |  | 鼠标悬停占位符 0.5s 显示详情 tooltip（名称、类型、当前样式） |
+|  | 图片占位符在左侧预览中以蓝灰色虚线框 + 名称标注 |
 |  | Word 视图预览（按页渲染，遵循原文档页面尺寸与页边距） |
 |  | 预览缩放：默认适应宽度、底部缩放开关、`Ctrl + 滚轮`缩放 |
 |  | 段落级编辑（保留 pPr、第一个 rPr 作为默认样式） |
@@ -53,6 +54,9 @@
 |  | 每处独立选字体 / 字号 / 颜色（系统字体全量，中文优先排序） |
 |  | 中文字号名（初号 ~ 八号）+ 数值磅值（5 ~ 72） |
 |  | 图片字段支持 PNG / JPEG / GIF |
+|  | 图片尺寸可配置：宽度/高度/等比自适应、保持宽高比、最大最小宽高约束 |
+|  | 图片尺寸配置持久化到 fields.json，模板保存后下次打开仍有效 |
+|  | 导出时自动读取实际图片尺寸，按配置计算最终大小（不再硬编码 240×240） |
 | 自动检测 | 插入字段时自动读取光标处的字体 / 字号 / 颜色当默认 |
 | 字体枚举 | Rust 端解析 `name` 表，免权限手势、含中文家族名、覆盖用户字体目录 |
 | 兼容性 | 输出符合 OOXML 规范，Word / WPS / LibreOffice 都能打开 |
@@ -184,18 +188,27 @@ node scripts/smoke-test.js
 | 占位符 | 类型 | 用法 | 备注 |
 |---|---|---|---|
 | `{@name}` | 文字 | `姓名：{@name}` | 行内可用，可跨多个 run |
-| `{%avatar}` | 图片 | `{%avatar}` | 建议单独占一行；默认 240×240 像素 |
+| `{%avatar}` | 图片 | `{%avatar}` | 建议单独占一行；支持宽度/高度/等比自适应，可配最大最小宽高 |
 
 字段名必须是 `\w+`（字母 / 数字 / 下划线）。中文 / 空格 / 符号都不行。
 
-**字段元数据**（描述）保存在 `.docx` 包内的 `template/fields.json`。**per-occurrence 样式**（每个占位符位置的字体/字号/颜色）也存在同一个 JSON 里：
+**字段元数据**（描述）保存在 `.docx` 包内的 `template/fields.json`。**per-occurrence 样式**（每个占位符位置的字体/字号/颜色）也存在同一个 JSON 里。图片字段额外存储 `imageConfig`（尺寸配置）：
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "fields": [
     { "name": "name", "type": "text", "description": "姓名" },
-    { "name": "avatar", "type": "image", "description": "证件照" }
+    { "name": "avatar", "type": "image", "description": "证件照",
+      "imageConfig": {
+        "fitMode": "width",
+        "maintainRatio": true,
+        "maxWidth": 300,
+        "maxHeight": 400,
+        "minWidth": 50,
+        "minHeight": 50
+      }
+    }
   ],
   "occStyles": [
     { "pIdx": 0, "occ": 0, "name": "name", "sigil": "@", "font": "方正小标宋简体", "size": 16, "sizeLabel": "三号", "color": "#000000" },
@@ -204,7 +217,7 @@ node scripts/smoke-test.js
 }
 ```
 
-同一字段名（如 `name`）在不同位置可以有不同的字体/字号/颜色。填写时文本内容联动同步，但各位置保持各自样式。
+`fitMode` 取值：`"width"`（宽度自适应）、`"height"`（高度自适应）、`"contain"`（在最大约束内等比缩放）。`maintainRatio` 为 `true` 时保持图片原始宽高比。
 
 兼容 v2：早期模板的 `defaultFont`/`defaultSize`/`defaultColor` 字段已移至 `occStyles`，旧模板加载时会回退到默认值。
 
@@ -340,6 +353,19 @@ mydoc.docx (zip)
 
 `styleMap[name]` 可以是单个样式对象（向后兼容）或样式数组（per-occurrence）。切完 run、把 `{@name}` 替换成 `{name}`，再交给 docxtemplater 跑标准替换。
 
+### 图片尺寸计算（填写模式）
+
+图片占位符 `{%name}` 由 `docxtemplater-image-module-free` 处理。`renderFilled` 中的 `getSize` 回调根据 `imageConfig` 动态计算最终尺寸：
+
+1. `getImage` 阶段从文件头（PNG IHDR / JPEG SOF / GIF descriptor）读取图片自然尺寸并缓存
+2. `getSize` 阶段根据 `fitMode` 计算：
+   - `"width"`：宽度固定为 `maxWidth`，高度按宽高比算（如果 `maintainRatio`）
+   - `"height"`：高度固定为 `maxHeight`，宽度按宽高比算
+   - `"contain"`：在 `maxWidth × maxHeight` 框内等比缩放
+3. 最终尺寸 clamp 到 `[minWidth..maxWidth] × [minHeight..maxHeight]`
+
+`imageConfig` 存在 `fields.json` 的 `fields` 条目中（per-field 级别），同一字段名的所有出现共享一套配置。
+
 `buildRPr({font, size, color})` 拼出符合 OOXML 的 `<w:rPr>`：
 
 ```xml
@@ -355,10 +381,11 @@ mydoc.docx (zip)
 
 ### 字段元数据持久化
 
-应用要在 `.docx` 里塞两类东西：
+应用要在 `.docx` 里塞三类东西：
 
 1. 字段描述（给操作员看的提示）
 2. per-occurrence 样式（每个占位符位置的字体 / 字号 / 颜色）
+3. 图片尺寸配置（自适应模式、宽高比、最大最小约束）
 
 存哪里？方案对比：
 
@@ -368,7 +395,7 @@ mydoc.docx (zip)
 | `docProps/custom.xml` | OOXML 标准，Word 保留 | 格式有 schema 限制，写起来繁琐 |
 | 编码到占位符里（如 `{@name,仿宋,小四,#000}`） | 不需额外文件 | 描述里有逗号会爆；docxtemplater 会把逗号当参数 |
 
-选了 JSON 方案，关键是 `buildTemplate` 写入 fields.json 时同步加 content type 声明。per-occurrence 样式以 `occStyles` 数组存储，每条记录包含段落索引（`pIdx`）、出现序号（`occ`）、字段名（`name`）和样式属性。
+选了 JSON 方案，关键是 `buildTemplate` 写入 fields.json 时同步加 content type 声明。per-occurrence 样式以 `occStyles` 数组存储，每条记录包含段落索引（`pIdx`）、出现序号（`occ`）、字段名（`name`）和样式属性。图片字段的 `imageConfig` 存在 `fields` 条目中（per-field 级别），包含 `fitMode`、`maintainRatio`、`maxWidth`、`maxHeight`、`minWidth`、`minHeight`。
 
 ```js
 function ensureJsonContentType(zip) {
@@ -571,15 +598,20 @@ Chromium 的 `<datalist>` 弹出框只显示约 4 项，长字体列表不能滚
 - **批量填写**：上传 Excel / CSV，按行批量生成 docx
 - **校验规则**：字段加 regex / 必填 / 最长字符等约束
 - **撤销/重做**：修改模板时误删字段后没法 undo，得重新打开文件
+- **图片预览增强**：预览区可点击图片占位符直接跳转到填写表单
 
 ## 已实现 / 完成
 
 - ✅ 三个模式：制作 / 修改 / 填写
 - ✅ 占位符高亮块渲染（contenteditable，蓝色=文字，粉色=图片）
 - ✅ Backspace / Delete 整块删除占位符，右键菜单删除
-- ✅ 双击占位符编辑（名称 + per-occurrence 样式）
+- ✅ 双击占位符编辑（名称 + per-occurrence 样式 / 图片尺寸配置）
 - ✅ 鼠标悬停占位符 0.5s 显示详情 tooltip
 - ✅ per-occurrence 样式：同一字段名在不同位置可有不同字体 / 字号 / 颜色
+- ✅ 图片占位符尺寸配置：宽度/高度/等比自适应、保持宽高比、最大最小宽高
+- ✅ 图片尺寸配置持久化到 fields.json（per-field 级别，v4 格式）
+- ✅ 导出时自动读取实际图片尺寸，按 imageConfig 动态计算最终大小
+- ✅ 图片占位符在左侧预览中以蓝灰色虚线框 + 名称标注
 - ✅ 填写模式多处出现的字段：文本联动同步，样式独立
 - ✅ 字段重命名（同步替换文档占位符）
 - ✅ 字段删除（占位符 + 元数据一起抹掉）
