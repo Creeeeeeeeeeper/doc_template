@@ -1,12 +1,12 @@
 [package]
-name = "tauri-app"
-version = "0.1.0"
-description = "Doc Template - DOCX template filler"
+name = "doc-template-filler"
+version = "1.0.0"
+description = "Doc Template Filler"
 authors = ["you"]
 edition = "2021"
 
 [lib]
-name = "tauri_app_lib"
+name = "doc_template_filler_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
